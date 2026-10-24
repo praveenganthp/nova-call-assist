@@ -1,0 +1,8 @@
+<resources>
+    <color name="navy_background">#0B111E</color>
+    <color name="navy_surface">#162032</color>
+    <color name="navy_surface_variant">#1E293B</color>
+    <color name="blue_primary">#2563EB</color>
+    <color name="blue_accent">#38BDF8</color>
+    <color name="white">#FFFFFF</color>
+</resources>

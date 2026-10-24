@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">Nova</string>
+    <string name="assistant_title">Nova Calling Assistant</string>
+    <string name="status_idle">Ready</string>
+    <string name="status_listening_wake_word">Listening for \"Hey Nova\"…</string>
+    <string name="status_listening_command">Listening for command…</string>
+    <string name="status_matching">Matching contact…</string>
+    <string name="status_confirming">Awaiting confirmation…</string>
+    <string name="status_calling">Initiating call…</string>
+    <string name="status_cancelled">Cancelled</string>
+    <string name="status_error">Error</string>
+    
+    <string name="btn_start_assistant">Start Assistant</string>
+    <string name="btn_stop_assistant">Stop Assistant</string>
+    <string name="btn_tap_to_speak">Tap to Speak</string>
+    <string name="btn_confirm_call">Call Now</string>
+    <string name="btn_cancel">Cancel</string>
+    <string name="btn_settings">Settings</string>
+
+    <string name="notification_channel_name">Nova Voice Service</string>
+    <string name="notification_channel_desc">Active background voice detection for Nova assistant</string>
+</resources>
