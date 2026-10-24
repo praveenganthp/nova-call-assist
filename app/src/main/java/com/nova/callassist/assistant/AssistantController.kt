@@ -27,7 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Main coordinator managing state transitions, speech engine, contacts matching,
@@ -59,8 +58,8 @@ class AssistantController(
     private var speechRecognizerManager: SpeechRecognizerManager? = null
     private var wakeWordDetector: WakeWordDetector? = null
 
-    private var confirmationJob: Job? = null
     private var isListeningForConfirmation = false
+    private var pendingCall: Pair<ContactModel, PhoneNumber>? = null
 
     init {
         scope.launch {
@@ -116,7 +115,6 @@ class AssistantController(
         wakeWordDetector?.stopSpotting()
         speechRecognizerManager?.stopListening()
         audioFeedbackManager.stop()
-        confirmationJob?.cancel()
         isListeningForConfirmation = false
         _state.value = AssistantState.Idle
     }
@@ -136,6 +134,25 @@ class AssistantController(
         }
     }
 
+    /**
+     * Downloads and initializes the offline speech model for non-technical users.
+     */
+    fun triggerModelDownload() {
+        scope.launch {
+            val result = modelManager.downloadAndInstallModel()
+            if (result.isSuccess) {
+                speechRecognizerManager = VoskSpeechRecognizerManager(result.getOrThrow())
+                audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CONFIRMATION_ACK)
+                audioFeedbackManager.speak("Offline speech model is ready.")
+            } else {
+                audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
+                _state.value = AssistantState.Error(
+                    "Model download failed: ${result.exceptionOrNull()?.message ?: "Network error"}"
+                )
+            }
+        }
+    }
+
     private fun ensureSpeechEngineReady(onReady: () -> Unit) {
         val loadedModel = modelManager.getLoadedModel()
         if (loadedModel != null) {
@@ -151,7 +168,7 @@ class AssistantController(
                     onReady()
                 } else {
                     _state.value = AssistantState.Error(
-                        "Offline speech model is not ready. Please check Settings."
+                        "Offline speech model is not ready. Please tap 'Download Model' above."
                     )
                 }
             }
@@ -217,8 +234,9 @@ class AssistantController(
     }
 
     override fun onError(errorMessage: String) {
+        audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
         _state.value = AssistantState.Error(errorMessage)
-        resumeStandbyAfterDelay(3000)
+        resumeStandbyAfterDelay(3500)
     }
 
     override fun onTimeout() {
@@ -245,7 +263,6 @@ class AssistantController(
                 }
             }
             is CommandParser.Command.SelectOption -> {
-                // If previously in ambiguous state, select option
                 val currentState = _state.value
                 if (currentState is AssistantState.AmbiguousMatches) {
                     val idx = command.index - 1
@@ -260,7 +277,6 @@ class AssistantController(
                 // Ignore confirm if not awaiting confirmation
             }
             is CommandParser.Command.Unknown -> {
-                // Attempt direct contact match on raw text if it looks like a name
                 processCallTarget(transcript)
             }
         }
@@ -281,16 +297,20 @@ class AssistantController(
                     onMultipleContactsMatched(result.query, result.candidates)
                 }
                 is MatchResult.NoPhoneNumber -> {
+                    audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
                     val msg = "${result.contact.displayName} has no phone number."
                     _state.value = AssistantState.Error(msg)
                     audioFeedbackManager.speak(msg)
-                    resumeStandbyAfterDelay(3500)
+                    resumeStandbyAfterDelay(4500)
                 }
                 is MatchResult.NoMatch -> {
-                    val msg = "I couldn't find a contact named $targetName."
-                    _state.value = AssistantState.Error(msg)
-                    audioFeedbackManager.speak(msg)
-                    resumeStandbyAfterDelay(3500)
+                    // Play negative chime to make it unmistakably clear no match was found
+                    audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
+                    val spokenMsg = "I couldn't find a contact named $targetName."
+                    val uiMsg = "No contact found matching \"$targetName\". Check your contacts list or spelling."
+                    _state.value = AssistantState.Error(uiMsg)
+                    audioFeedbackManager.speak(spokenMsg)
+                    resumeStandbyAfterDelay(4500)
                 }
             }
         }
@@ -318,7 +338,6 @@ class AssistantController(
     private fun listenForConfirmation() {
         isListeningForConfirmation = true
         speechRecognizerManager?.setListener(this)
-        // Constrain confirmation grammar for high accuracy and fast response
         val confirmGrammar = listOf(
             "yes", "confirm", "call", "go ahead", "okay", "no", "cancel", "stop", "[unk]"
         )
@@ -368,10 +387,11 @@ class AssistantController(
     fun selectAmbiguousCandidate(contact: ContactModel) {
         val number = contact.primaryOrFirstNumber
         if (number == null) {
+            audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
             val msg = "${contact.displayName} has no phone number."
             _state.value = AssistantState.Error(msg)
             audioFeedbackManager.speak(msg)
-            resumeStandbyAfterDelay(3000)
+            resumeStandbyAfterDelay(3500)
             return
         }
 
@@ -387,6 +407,37 @@ class AssistantController(
         val currentState = _state.value
         if (currentState is AssistantState.AwaitingConfirmation) {
             executeCall(currentState.contact, currentState.selectedNumber)
+        }
+    }
+
+    /**
+     * Dismisses the active error message and returns to idle.
+     */
+    fun dismissError() {
+        if (_state.value is AssistantState.Error) {
+            _state.value = AssistantState.Idle
+        }
+    }
+
+    /**
+     * Called by MainActivity when a required permission is granted by the user.
+     */
+    fun onPermissionGranted(permission: String) {
+        if (permission == Manifest.permission.CALL_PHONE) {
+            val pending = pendingCall
+            if (pending != null) {
+                pendingCall = null
+                executeCall(pending.first, pending.second)
+                return
+            }
+        }
+        val missing = checkMissingPermissions()
+        if (missing.isEmpty()) {
+            if (_state.value is AssistantState.PermissionRequired) {
+                _state.value = AssistantState.Idle
+            }
+        } else {
+            _state.value = AssistantState.PermissionRequired(missing)
         }
     }
 
@@ -419,10 +470,13 @@ class AssistantController(
                 val result = callManager.placeCall(number, directCalling)
                 when (result) {
                     is CallManager.CallResult.Success -> {
+                        pendingCall = null
                         _state.value = AssistantState.CallInitiated(contact, number)
                         resumeStandbyAfterDelay(4000)
                     }
                     is CallManager.CallResult.PermissionDenied -> {
+                        // Remember pending call so granting permission executes the call immediately
+                        pendingCall = Pair(contact, number)
                         _state.value = AssistantState.PermissionRequired(
                             listOf(Manifest.permission.CALL_PHONE)
                         )

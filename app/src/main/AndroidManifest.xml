@@ -10,6 +10,9 @@
     <!-- Direct calling when enabled by user in settings (otherwise ACTION_DIAL is used) -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
 
+    <!-- Internet access used ONLY for optional in-app download of the free offline speech model -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Foreground service permissions for background assistant operation -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />

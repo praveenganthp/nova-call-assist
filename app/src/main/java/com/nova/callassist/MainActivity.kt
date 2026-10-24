@@ -2,8 +2,10 @@ package com.nova.callassist
 
 import android.Manifest
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,10 +32,16 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val audioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
         val contactsGranted = permissions[Manifest.permission.READ_CONTACTS] == true
+        val callGranted = permissions[Manifest.permission.CALL_PHONE] == true
 
-        if (audioGranted && contactsGranted) {
-            // Permissions acquired, refresh contacts cache
+        if (audioGranted || contactsGranted) {
             app.contactsRepository.invalidateCache()
+        }
+
+        permissions.forEach { (perm, granted) ->
+            if (granted) {
+                app.assistantController.onPermissionGranted(perm)
+            }
         }
     }
 
@@ -53,13 +61,18 @@ class MainActivity : ComponentActivity() {
                         MainScreen(
                             controller = app.assistantController,
                             onNavigateToSettings = { currentScreen = Screen.Settings },
-                            onRequestPermissions = { requestRequiredPermissions() }
+                            onRequestPermissions = { missing -> requestRequiredPermissions(missing) },
+                            onOpenAppSettings = { openAppSettings() }
                         )
                     }
                     Screen.Settings -> {
                         SettingsScreen(
                             settingsRepository = app.settingsRepository,
                             modelManager = app.speechModelManager,
+                            onRequestCallPermission = {
+                                permissionLauncher.launch(arrayOf(Manifest.permission.CALL_PHONE))
+                            },
+                            onOpenAppSettings = { openAppSettings() },
                             onNavigateBack = { currentScreen = Screen.Main }
                         )
                     }
@@ -84,7 +97,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestRequiredPermissions() {
+    /**
+     * Requests required permissions. If a specific list of missing permissions is provided,
+     * requests those; otherwise requests standard runtime permissions.
+     */
+    fun requestRequiredPermissions(specificPermissions: List<String>? = null) {
+        if (!specificPermissions.isNullOrEmpty()) {
+            permissionLauncher.launch(specificPermissions.toTypedArray())
+            return
+        }
+
         val permissions = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_CONTACTS
@@ -95,5 +117,17 @@ class MainActivity : ComponentActivity() {
         }
 
         permissionLauncher.launch(permissions.toTypedArray())
+    }
+
+    /**
+     * Opens the device App Info Settings screen so users can manually grant
+     * permissions if the OS is blocking dialog prompts.
+     */
+    fun openAppSettings() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", packageName, null)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(intent)
     }
 }

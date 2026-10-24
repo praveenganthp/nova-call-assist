@@ -17,12 +17,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -59,6 +63,8 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(
     settingsRepository: SettingsRepository,
     modelManager: SpeechModelManager,
+    onRequestCallPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     onNavigateBack: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -144,14 +150,28 @@ fun SettingsScreen(
                         "Safe default: Uses ACTION_DIAL to open the dialer with the number pre-filled. No CALL_PHONE permission required."
                     },
                     checked = directCallingEnabled,
-                    onCheckedChange = { coroutineScope.launch { settingsRepository.setDirectCallingEnabled(it) } }
+                    onCheckedChange = { enabled ->
+                        coroutineScope.launch {
+                            settingsRepository.setDirectCallingEnabled(enabled)
+                            if (enabled) {
+                                onRequestCallPermission()
+                            }
+                        }
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
 
                 SectionTitle(title = "OFFLINE SPEECH MODEL")
 
-                ModelStatusCard(modelStatus = modelStatus)
+                ModelStatusCard(
+                    modelStatus = modelStatus,
+                    onDownloadClick = {
+                        coroutineScope.launch {
+                            modelManager.downloadAndInstallModel()
+                        }
+                    }
+                )
 
                 Spacer(modifier = Modifier.height(24.dp))
 
@@ -233,7 +253,10 @@ private fun SettingToggleCard(
 }
 
 @Composable
-private fun ModelStatusCard(modelStatus: SpeechModelManager.ModelStatus) {
+private fun ModelStatusCard(
+    modelStatus: SpeechModelManager.ModelStatus,
+    onDownloadClick: () -> Unit
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -278,22 +301,66 @@ private fun ModelStatusCard(modelStatus: SpeechModelManager.ModelStatus) {
                 is SpeechModelManager.ModelStatus.Checking -> {
                     Text(text = "Checking offline model status…", color = TextSecondary, fontSize = 13.sp)
                 }
-                is SpeechModelManager.ModelStatus.Installing -> {
-                    Text(text = "Unpacking offline model from storage/assets…", color = AmberWarning, fontSize = 13.sp)
+                is SpeechModelManager.ModelStatus.Downloading -> {
+                    Text(
+                        text = "Downloading offline speech model: ${modelStatus.progressPercent}% (${modelStatus.bytesDownloaded / 1048576} MB / ${modelStatus.totalBytes / 1048576} MB)",
+                        color = BlueAccent,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { (modelStatus.progressPercent / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                        color = BlueAccent,
+                        trackColor = CardBorder
+                    )
+                }
+                is SpeechModelManager.ModelStatus.Unpacking -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = BlueAccent,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Unpacking offline model into app storage…",
+                            color = TextPrimary,
+                            fontSize = 13.sp
+                        )
+                    }
                 }
                 is SpeechModelManager.ModelStatus.NotInstalled, is SpeechModelManager.ModelStatus.Error -> {
                     Text(
-                        text = "Model not found in internal storage.",
+                        text = if (modelStatus is SpeechModelManager.ModelStatus.Error) {
+                            "Setup error: ${modelStatus.message}"
+                        } else {
+                            "Model not yet installed."
+                        },
                         color = AmberWarning,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "To enable full voice recognition on device, copy vosk-model-small-en-us-0.15 into app storage or assets/model. Typed fallback testing works out of the box.",
+                        text = "Tap below to automatically download the official lightweight model (40 MB) directly onto your phone.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = onDownloadClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = BluePrimary),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "Download Model (40 MB)", fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -368,7 +435,8 @@ private fun PrivacyAssuranceCard() {
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "• Zero internet requests: Nova never uploads your audio or your contacts.\n" +
+                text = "• Zero internet requests for speech or contacts: Audio and names never leave your device.\n" +
+                        "• One-time model download: Once the voice model is downloaded, Nova works with zero internet forever.\n" +
                         "• Local matching: All name searches run purely in-memory on your phone.\n" +
                         "• Permissive License: Vosk speech engine is open source under Apache 2.0.\n" +
                         "• Version 1.0.0",

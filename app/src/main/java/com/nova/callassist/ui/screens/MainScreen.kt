@@ -1,5 +1,6 @@
 package com.nova.callassist.ui.screens
 
+import android.Manifest
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -20,15 +21,21 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -52,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nova.callassist.assistant.AssistantController
 import com.nova.callassist.assistant.AssistantState
+import com.nova.callassist.speech.SpeechModelManager
 import com.nova.callassist.ui.components.AmbiguousCandidateRow
 import com.nova.callassist.ui.components.ContactConfirmationCard
 import com.nova.callassist.ui.components.MicPulseIndicator
@@ -61,6 +69,7 @@ import com.nova.callassist.ui.theme.BlueAccent
 import com.nova.callassist.ui.theme.BluePrimary
 import com.nova.callassist.ui.theme.CardBackground
 import com.nova.callassist.ui.theme.CardBorder
+import com.nova.callassist.ui.theme.EmeraldGreen
 import com.nova.callassist.ui.theme.Navy900
 import com.nova.callassist.ui.theme.RoseError
 import com.nova.callassist.ui.theme.TextPrimary
@@ -72,11 +81,13 @@ import com.nova.callassist.ui.theme.TextTertiary
 fun MainScreen(
     controller: AssistantController,
     onNavigateToSettings: () -> Unit,
-    onRequestPermissions: () -> Unit
+    onRequestPermissions: (List<String>) -> Unit,
+    onOpenAppSettings: () -> Unit
 ) {
     val state by controller.state.collectAsState()
     val transcript by controller.lastTranscript.collectAsState()
     val isAssistantActive by controller.isAssistantActive.collectAsState()
+    val modelStatus by controller.modelManager.status.collectAsState()
 
     var manualTestCommand by remember { mutableStateOf("") }
 
@@ -126,19 +137,40 @@ fun MainScreen(
             item {
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Permission Warning Banner if missing permissions
-                if (state is AssistantState.PermissionRequired) {
-                    PermissionWarningCard(
-                        missing = (state as AssistantState.PermissionRequired).missingPermissions,
-                        onRequest = onRequestPermissions
+                // 1. One-Tap Offline Speech Model Setup Card (for non-tech users)
+                if (modelStatus !is SpeechModelManager.ModelStatus.Ready) {
+                    ModelSetupBanner(
+                        modelStatus = modelStatus,
+                        onDownloadClick = { controller.triggerModelDownload() }
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
+
+                // 2. Permission Warning Card (handles RECORD_AUDIO, READ_CONTACTS, and CALL_PHONE)
+                if (state is AssistantState.PermissionRequired) {
+                    val missing = (state as AssistantState.PermissionRequired).missingPermissions
+                    PermissionWarningCard(
+                        missing = missing,
+                        onRequest = { onRequestPermissions(missing) },
+                        onOpenSettings = onOpenAppSettings
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
+
+                // 3. Clear Visible Error / Unknown Contact Banner
+                if (state is AssistantState.Error) {
+                    val errorMsg = (state as AssistantState.Error).message
+                    ErrorMessageCard(
+                        message = errorMsg,
+                        onDismiss = { controller.dismissError() }
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
                 }
 
                 // Status Badge
                 StatusBadge(state = state)
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
                 // Central Animated Mic Pulse
                 MicPulseIndicator(
@@ -161,13 +193,14 @@ fun MainScreen(
                         is AssistantState.ListeningForCommand -> "Say \"Call [Contact Name]\""
                         is AssistantState.AwaitingConfirmation -> "Say \"Yes\" to confirm, or \"Cancel\""
                         is AssistantState.AmbiguousMatches -> "Say the contact's full name or select below"
+                        is AssistantState.Error -> "Check contact name or retry"
                         else -> "Tap the microphone to speak"
                     },
                     color = TextSecondary,
                     fontSize = 14.sp
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
                 // Live transcript card
                 TranscriptCard(
@@ -273,9 +306,9 @@ fun MainScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
-                // Manual Command Simulator / Tester (works without mic/offline model for easy testing)
+                // Manual Command Simulator / Tester
                 CommandTestingInput(
                     value = manualTestCommand,
                     onValueChange = { manualTestCommand = it },
@@ -288,6 +321,217 @@ fun MainScreen(
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+/**
+ * Banner enabling non-technical users to download and set up the offline voice model with one tap.
+ */
+@Composable
+private fun ModelSetupBanner(
+    modelStatus: SpeechModelManager.ModelStatus,
+    onDownloadClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0x2238BDF8))
+            .border(1.dp, BlueAccent.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = null,
+                    tint = BlueAccent,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Offline Voice Recognition Setup",
+                    color = BlueAccent,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+
+            when (modelStatus) {
+                is SpeechModelManager.ModelStatus.Downloading -> {
+                    Text(
+                        text = "Downloading offline speech model: ${modelStatus.progressPercent}% (${modelStatus.bytesDownloaded / 1048576} MB / ${modelStatus.totalBytes / 1048576} MB)",
+                        color = TextPrimary,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LinearProgressIndicator(
+                        progress = { (modelStatus.progressPercent / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                        color = BlueAccent,
+                        trackColor = CardBorder
+                    )
+                }
+                is SpeechModelManager.ModelStatus.Unpacking -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = BlueAccent,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Unpacking offline model into app storage…",
+                            color = TextPrimary,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+                else -> {
+                    Text(
+                        text = "Download the lightweight offline speech model (40 MB) once. After this download, Nova hears and dials 100% offline with zero internet forever.",
+                        color = TextPrimary,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = onDownloadClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = BluePrimary),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudDownload,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = "Download Voice Model (40 MB)", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dedicated visual error card when no contact matches or an error occurs.
+ */
+@Composable
+private fun ErrorMessageCard(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0x22EF4444))
+            .border(1.dp, RoseError.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.ErrorOutline,
+                contentDescription = null,
+                tint = RoseError,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "No Match Found",
+                    color = RoseError,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = message,
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+            }
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionWarningCard(
+    missing: List<String>,
+    onRequest: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    val isCallPermissionOnly = missing.size == 1 && missing.contains(Manifest.permission.CALL_PHONE)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0x22F59E0B))
+            .border(1.dp, AmberWarning.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = AmberWarning,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (isCallPermissionOnly) "Phone Call Permission Required" else "Permissions Required",
+                    color = AmberWarning,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = if (isCallPermissionOnly) {
+                    "Direct Calling is enabled. Nova requires Phone Call permission (CALL_PHONE) to dial numbers directly without opening the dialer."
+                } else {
+                    "Nova needs microphone and contacts access to recognize voice commands and search your phonebook."
+                },
+                color = TextPrimary,
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onRequest,
+                    colors = ButtonDefaults.buttonColors(containerColor = AmberWarning),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(text = "Grant Permission", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+
+                OutlinedButton(
+                    onClick = onOpenSettings,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
+                    border = ButtonDefaults.outlinedButtonBorder(true)
+                ) {
+                    Text(text = "Open App Settings")
+                }
             }
         }
     }
@@ -327,53 +571,6 @@ private fun TranscriptCard(
                 fontSize = 16.sp,
                 fontWeight = if (transcript.isNotBlank()) FontWeight.Medium else FontWeight.Normal
             )
-        }
-    }
-}
-
-@Composable
-private fun PermissionWarningCard(
-    missing: List<String>,
-    onRequest: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0x22F59E0B))
-            .border(1.dp, AmberWarning.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
-            .padding(16.dp)
-    ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.Warning,
-                    contentDescription = null,
-                    tint = AmberWarning,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Permissions Required",
-                    color = AmberWarning,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "Nova needs microphone and contacts access to recognize voice commands and dial your contacts.",
-                color = TextPrimary,
-                fontSize = 13.sp
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            Button(
-                onClick = onRequest,
-                colors = ButtonDefaults.buttonColors(containerColor = AmberWarning),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text(text = "Grant Permissions", color = Color.Black, fontWeight = FontWeight.Bold)
-            }
         }
     }
 }
