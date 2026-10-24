@@ -375,24 +375,9 @@ private fun ModelSetupBanner(
                         trackColor = CardBorder
                     )
                 }
-                is SpeechModelManager.ModelStatus.Unpacking -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            color = BlueAccent,
-                            strokeWidth = 2.dp
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Unpacking offline model into app storage…",
-                            color = TextPrimary,
-                            fontSize = 13.sp
-                        )
-                    }
-                }
                 else -> {
                     Text(
-                        text = "Download the lightweight offline speech model (40 MB) once. After this download, Nova hears and dials 100% offline with zero internet forever.",
+                        text = "Download the lightweight offline Whisper model (31 MB) once. After this download, Nova hears and dials 100% offline with zero internet forever.",
                         color = TextPrimary,
                         fontSize = 13.sp,
                         lineHeight = 18.sp
@@ -409,7 +394,7 @@ private fun ModelSetupBanner(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "Download Voice Model (40 MB)", fontWeight = FontWeight.Bold)
+                        Text(text = "Download Whisper Model (31 MB)", fontWeight = FontWeight.Bold)
                     }
                 }
             }

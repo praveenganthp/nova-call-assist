@@ -16,6 +16,19 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+
+    ndkVersion = "28.2.13676358"
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -68,9 +81,6 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.datastore.preferences)
-
-    // Offline speech recognition (vosk-android bundles jna natively)
-    implementation(libs.vosk.android)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -27,9 +28,18 @@ class SettingsRepository(private val context: Context) {
         val KEY_VOICE_RESPONSES_ENABLED = booleanPreferencesKey("voice_responses_enabled")
         val KEY_CONFIRMATION_REQUIRED = booleanPreferencesKey("confirmation_required")
         val KEY_MODEL_LANGUAGE = stringPreferencesKey("model_language")
+        val KEY_CPU_THREADS = intPreferencesKey("cpu_threads")
     }
 
     private val dataStore = context.dataStore
+
+    val cpuThreads: Flow<Int> = dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { preferences ->
+            preferences[KEY_CPU_THREADS] ?: 4
+        }
 
     val wakeWordEnabled: Flow<Boolean> = dataStore.data
         .catch { exception ->
@@ -98,6 +108,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setModelLanguage(language: String) {
         dataStore.edit { preferences ->
             preferences[KEY_MODEL_LANGUAGE] = language
+        }
+    }
+
+    suspend fun setCpuThreads(threads: Int) {
+        dataStore.edit { preferences ->
+            preferences[KEY_CPU_THREADS] = threads.coerceIn(1, 8)
         }
     }
 }

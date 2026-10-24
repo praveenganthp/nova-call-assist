@@ -2,7 +2,7 @@ package com.nova.callassist.speech
 
 /**
  * Modular interface for offline speech recognition.
- * Allows switching between Vosk, Whisper.tflite, or other offline backends.
+ * Encapsulates the audio capture pipeline and speech recognition engine.
  */
 interface SpeechRecognizerManager {
 

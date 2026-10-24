@@ -15,8 +15,9 @@ import com.nova.callassist.settings.SettingsRepository
 import com.nova.callassist.speech.SpeechModelManager
 import com.nova.callassist.speech.SpeechRecognitionListener
 import com.nova.callassist.speech.SpeechRecognizerManager
-import com.nova.callassist.speech.VoskSpeechRecognizerManager
+import com.nova.callassist.speech.TranscriptionMetrics
 import com.nova.callassist.speech.WakeWordDetector
+import com.nova.callassist.speech.WhisperSpeechRecognizerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,10 +53,13 @@ class AssistantController(
     private val _isAssistantActive = MutableStateFlow(false)
     val isAssistantActive: StateFlow<Boolean> = _isAssistantActive.asStateFlow()
 
+    private val _lastMetrics = MutableStateFlow<TranscriptionMetrics?>(null)
+    val lastMetrics: StateFlow<TranscriptionMetrics?> = _lastMetrics.asStateFlow()
+
     private val commandParser = CommandParser()
     private val contactMatcher = ContactMatcher()
 
-    private var speechRecognizerManager: SpeechRecognizerManager? = null
+    private var speechRecognizerManager: WhisperSpeechRecognizerManager? = null
     private var wakeWordDetector: WakeWordDetector? = null
 
     private var isListeningForConfirmation = false
@@ -141,9 +145,10 @@ class AssistantController(
         scope.launch {
             val result = modelManager.downloadAndInstallModel()
             if (result.isSuccess) {
-                speechRecognizerManager = VoskSpeechRecognizerManager(result.getOrThrow())
+                val threads = settingsRepository.cpuThreads.first()
+                initRecognizerManager(threads)
                 audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CONFIRMATION_ACK)
-                audioFeedbackManager.speak("Offline speech model is ready.")
+                audioFeedbackManager.speak("Offline Whisper speech model is ready.")
             } else {
                 audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
                 _state.value = AssistantState.Error(
@@ -153,18 +158,33 @@ class AssistantController(
         }
     }
 
-    private fun ensureSpeechEngineReady(onReady: () -> Unit) {
-        val loadedModel = modelManager.getLoadedModel()
-        if (loadedModel != null) {
-            if (speechRecognizerManager == null) {
-                speechRecognizerManager = VoskSpeechRecognizerManager(loadedModel)
+    private fun initRecognizerManager(threads: Int) {
+        val recognizer = WhisperSpeechRecognizerManager(modelManager.speechEngine, threadCount = threads)
+        speechRecognizerManager = recognizer
+        scope.launch {
+            recognizer.lastMetrics.collect { m ->
+                if (m != null) {
+                    _lastMetrics.value = m
+                }
             }
-            onReady()
+        }
+    }
+
+    private fun ensureSpeechEngineReady(onReady: () -> Unit) {
+        if (modelManager.isReady()) {
+            scope.launch {
+                val threads = settingsRepository.cpuThreads.first()
+                if (speechRecognizerManager == null) {
+                    initRecognizerManager(threads)
+                }
+                onReady()
+            }
         } else {
             scope.launch {
                 val status = modelManager.initModel()
                 if (status is SpeechModelManager.ModelStatus.Ready) {
-                    speechRecognizerManager = VoskSpeechRecognizerManager(status.model)
+                    val threads = settingsRepository.cpuThreads.first()
+                    initRecognizerManager(threads)
                     onReady()
                 } else {
                     _state.value = AssistantState.Error(
@@ -177,9 +197,9 @@ class AssistantController(
 
     private fun startWakeWordListening() {
         wakeWordDetector?.stopSpotting()
-        val recognizer = speechRecognizerManager ?: return
+        if (!modelManager.isReady()) return
 
-        wakeWordDetector = WakeWordDetector(recognizer) {
+        wakeWordDetector = WakeWordDetector(modelManager.speechEngine) {
             scope.launch {
                 onWakeWordDetected()
             }
@@ -212,42 +232,13 @@ class AssistantController(
 
     private fun beginAudioCaptureForCommand() {
         scope.launch {
-            val contacts = contactsRepository.loadContacts()
-            val dynamicGrammar = buildDynamicCommandGrammar(contacts)
-            speechRecognizerManager?.setListener(this@AssistantController)
-            speechRecognizerManager?.startListening(grammar = dynamicGrammar, timeoutMs = 8000)
-        }
-    }
-
-    /**
-     * Builds a constrained recognition grammar directly from the user's phonebook contacts.
-     * Prevents the US English acoustic model from substituting unfamiliar names with random English words.
-     */
-    private fun buildDynamicCommandGrammar(contacts: List<ContactModel>): List<String> {
-        val grammar = mutableSetOf(
-            "call", "please call", "make a call to", "place a call to", "dial", "phone",
-            "cancel", "stop", "repeat", "who", "who is it", "yes", "confirm", "okay", "no", "[unk]"
-        )
-
-        contacts.take(200).forEach { contact ->
-            val clean = contact.displayName.lowercase()
-                .replace(Regex("[^a-zA-Z\\s]"), " ")
-                .replace(Regex("\\s+"), " ")
-                .trim()
-
-            if (clean.isNotBlank()) {
-                grammar.add(clean)
-                grammar.add("call $clean")
-                grammar.add("please call $clean")
-
-                clean.split(" ").filter { it.length >= 2 }.forEach { token ->
-                    grammar.add(token)
-                    grammar.add("call $token")
-                    grammar.add("please call $token")
-                }
+            val threads = settingsRepository.cpuThreads.first()
+            if (speechRecognizerManager == null) {
+                initRecognizerManager(threads)
             }
+            speechRecognizerManager?.setListener(this@AssistantController)
+            speechRecognizerManager?.startListening(timeoutMs = 8000)
         }
-        return grammar.toList()
     }
 
     override fun onPartialResult(partialText: String) {
@@ -372,11 +363,14 @@ class AssistantController(
 
     private fun listenForConfirmation() {
         isListeningForConfirmation = true
-        speechRecognizerManager?.setListener(this)
-        val confirmGrammar = listOf(
-            "yes", "confirm", "call", "go ahead", "okay", "no", "cancel", "stop", "[unk]"
-        )
-        speechRecognizerManager?.startListening(grammar = confirmGrammar, timeoutMs = 6000)
+        scope.launch {
+            val threads = settingsRepository.cpuThreads.first()
+            if (speechRecognizerManager == null) {
+                initRecognizerManager(threads)
+            }
+            speechRecognizerManager?.setListener(this@AssistantController)
+            speechRecognizerManager?.startListening(timeoutMs = 6000)
+        }
     }
 
     private fun handleConfirmationTranscript(transcript: String) {
@@ -553,6 +547,7 @@ class AssistantController(
         audioFeedbackManager.release()
         speechRecognizerManager?.destroy()
         speechRecognizerManager = null
+        wakeWordDetector?.destroy()
         wakeWordDetector = null
     }
 }

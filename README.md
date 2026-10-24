@@ -8,8 +8,10 @@ Nova operates **strictly without paid APIs, without cloud speech streaming, with
 
 ## 1. Key Features
 
-- **100% Offline Speech Recognition**: Powered by the permissively licensed (Apache 2.0) Vosk speech engine running locally on-device.
-- **Wake-Word Detection**: Offline keyword spotting for `"Hey Nova"` using constrained grammar decoding for low CPU and battery footprint.
+- **100% Offline Speech Recognition**: Powered by on-device OpenAI Whisper using high-performance `whisper.cpp` (MIT licensed) compiled natively via Android NDK with ARM NEON / OpenMP acceleration.
+- **Superior Indian English Name Recognition**: Accurately transcribes diverse Indian names (e.g. *"Call Praveen"*, *"Call Vignesh"*, *"Call Karthik"*, *"Call Arun"*) without substituting random English dictionary words.
+- **Wake-Word Detection**: Offline voice-gated keyword spotting for `"Hey Nova"` using continuous RMS audio energy gating (0% CPU during silence).
+- **Diagnostics & Benchmark Dashboard**: Live measurement of model load time, transcription latency (ms), audio duration (s), Real-Time Factor (RTF), and configurable CPU inference thread counts (2-8).
 - **Smart Contact Matching**:
   - Deterministic multi-tier matching: Exact match -> Prefix match -> Word overlap -> Substring match -> Levenshtein phonetic distance.
   - Automatic detection of ambiguous matches (e.g. user says *"Call Arun"* when both *"Arun Kumar"* and *"Arun Prakash"* exist). Prompts the user verbally and visually to select the right person.
@@ -59,11 +61,17 @@ app/src/main/java/com/nova/callassist/
 │   ├── AssistantService.kt         # Android 14+ FOREGROUND_SERVICE_MICROPHONE
 │   └── CommandParser.kt            # Natural voice command parser
 ├── speech/
-│   ├── SpeechRecognizerManager.kt  # Modular speech engine interface
-│   ├── VoskSpeechRecognizerManager.kt # Vosk offline speech engine
-│   ├── WakeWordDetector.kt         # Grammar-based "Hey Nova" keyword spotter
-│   ├── SpeechModelManager.kt       # Local model locator & unpacker
+│   ├── SpeechRecognitionEngine.kt  # Modular speech engine interface
+│   ├── WhisperSpeechEngine.kt      # whisper.cpp JNI wrapper implementation
+│   ├── SpeechRecognizerManager.kt  # Audio pipeline interface
+│   ├── WhisperSpeechRecognizerManager.kt # 16kHz PCM AudioRecord & VAD processing
+│   ├── WakeWordDetector.kt         # Voice-gated "Hey Nova" keyword spotter
+│   ├── SpeechModelManager.kt       # Local model download & lifecycle manager
 │   └── SpeechRecognitionListener.kt# Partial/final hypothesis callbacks
+├── cpp/
+│   ├── CMakeLists.txt              # NDK build targeting arm64-v8a, armeabi-v7a, x86_64
+│   ├── jni.c                       # Official JNI bridge to whisper.cpp
+│   └── whisper/                    # whisper.cpp & GGML C/C++ engine sources
 ├── contacts/
 │   ├── ContactModel.kt             # Data classes (Contact, PhoneNumber, MatchResult)
 │   ├── ContactsRepository.kt       # Queries device Contacts Provider safely

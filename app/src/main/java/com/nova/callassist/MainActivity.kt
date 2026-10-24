@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
                         SettingsScreen(
                             settingsRepository = app.settingsRepository,
                             modelManager = app.speechModelManager,
+                            controller = app.assistantController,
                             onRequestCallPermission = {
                                 permissionLauncher.launch(arrayOf(Manifest.permission.CALL_PHONE))
                             },
