@@ -211,8 +211,43 @@ class AssistantController(
     }
 
     private fun beginAudioCaptureForCommand() {
-        speechRecognizerManager?.setListener(this)
-        speechRecognizerManager?.startListening(timeoutMs = 7000)
+        scope.launch {
+            val contacts = contactsRepository.loadContacts()
+            val dynamicGrammar = buildDynamicCommandGrammar(contacts)
+            speechRecognizerManager?.setListener(this@AssistantController)
+            speechRecognizerManager?.startListening(grammar = dynamicGrammar, timeoutMs = 8000)
+        }
+    }
+
+    /**
+     * Builds a constrained recognition grammar directly from the user's phonebook contacts.
+     * Prevents the US English acoustic model from substituting unfamiliar names with random English words.
+     */
+    private fun buildDynamicCommandGrammar(contacts: List<ContactModel>): List<String> {
+        val grammar = mutableSetOf(
+            "call", "please call", "make a call to", "place a call to", "dial", "phone",
+            "cancel", "stop", "repeat", "who", "who is it", "yes", "confirm", "okay", "no", "[unk]"
+        )
+
+        contacts.take(200).forEach { contact ->
+            val clean = contact.displayName.lowercase()
+                .replace(Regex("[^a-zA-Z\\s]"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+            if (clean.isNotBlank()) {
+                grammar.add(clean)
+                grammar.add("call $clean")
+                grammar.add("please call $clean")
+
+                clean.split(" ").filter { it.length >= 2 }.forEach { token ->
+                    grammar.add(token)
+                    grammar.add("call $token")
+                    grammar.add("please call $token")
+                }
+            }
+        }
+        return grammar.toList()
     }
 
     override fun onPartialResult(partialText: String) {

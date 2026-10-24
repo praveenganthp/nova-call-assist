@@ -83,11 +83,15 @@ class ContactMatcher {
             return MatchResult.Ambiguous(query, substringMatches)
         }
 
-        // Tier 6: Levenshtein distance for speech recognition variances (e.g. "Aron" -> "Arun")
+        // Tier 6: Levenshtein distance for speech recognition variances (e.g. "Aron" -> "Arun", "Iron" -> "Arun")
         val fuzzyMatches = contacts.mapNotNull { contact ->
             val normName = normalize(contact.displayName)
             val minDistance = calculateMinTokenDistance(queryTokens, tokenize(normName))
-            val threshold = if (cleanQuery.length >= 6) 2 else 1
+            val threshold = when {
+                cleanQuery.length >= 7 -> 3
+                cleanQuery.length >= 4 -> 2
+                else -> 1
+            }
             if (minDistance <= threshold) {
                 Pair(contact, minDistance)
             } else {
