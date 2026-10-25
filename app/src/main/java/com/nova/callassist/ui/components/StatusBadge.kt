@@ -35,6 +35,8 @@ fun StatusBadge(
         is AssistantState.Idle -> Triple("Standby", TextSecondary, Color(0x2294A3B8))
         is AssistantState.ListeningForWakeWord -> Triple("Listening for \"Hey Nova\"", BlueAccent, Color(0x2238BDF8))
         is AssistantState.ListeningForCommand -> Triple("Listening…", EmeraldGreen, Color(0x2210B981))
+        is AssistantState.Transcribing -> Triple("Transcribing Voice…", BlueAccent, Color(0x2238BDF8))
+        is AssistantState.ProcessingCommand -> Triple("Processing Command…", EmeraldGreen, Color(0x2210B981))
         is AssistantState.MatchingContact -> Triple("Finding Contact…", BlueAccent, Color(0x2238BDF8))
         is AssistantState.AwaitingConfirmation -> Triple("Confirmation Needed", AmberWarning, Color(0x22F59E0B))
         is AssistantState.AmbiguousMatches -> Triple("Multiple Matches", AmberWarning, Color(0x22F59E0B))

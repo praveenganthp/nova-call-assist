@@ -12,6 +12,7 @@ import com.nova.callassist.contacts.ContactsRepository
 import com.nova.callassist.contacts.MatchResult
 import com.nova.callassist.contacts.PhoneNumber
 import com.nova.callassist.settings.SettingsRepository
+import com.nova.callassist.speech.AudioCaptureCoordinator
 import com.nova.callassist.speech.SpeechModelManager
 import com.nova.callassist.speech.SpeechRecognitionListener
 import com.nova.callassist.speech.SpeechRecognizerManager
@@ -56,6 +57,11 @@ class AssistantController(
     private val _lastMetrics = MutableStateFlow<TranscriptionMetrics?>(null)
     val lastMetrics: StateFlow<TranscriptionMetrics?> = _lastMetrics.asStateFlow()
 
+    private val _diagnostics = MutableStateFlow(AssistantDiagnostics())
+    val diagnostics: StateFlow<AssistantDiagnostics> = _diagnostics.asStateFlow()
+
+    val audioCaptureCoordinator = AudioCaptureCoordinator()
+
     private val commandParser = CommandParser()
     private val contactMatcher = ContactMatcher()
 
@@ -64,11 +70,36 @@ class AssistantController(
 
     private var isListeningForConfirmation = false
     private var pendingCall: Pair<ContactModel, PhoneNumber>? = null
+    private var wakeWordTriggerCount = 0
+    private var lastWakeTimestamp = 0L
 
     init {
         scope.launch {
             modelManager.initModel()
         }
+        scope.launch {
+            audioCaptureCoordinator.telemetry.collect { tel ->
+                _diagnostics.value = _diagnostics.value.copy(
+                    currentRms = tel.currentRms,
+                    ambientNoiseFloor = tel.ambientNoiseFloor,
+                    dynamicSpeechThreshold = tel.dynamicThreshold,
+                    speechOnsetDetected = tel.speechOnsetDetected,
+                    audioRecordStatus = tel.statusMessage
+                )
+            }
+        }
+    }
+
+    private fun updateDiagnostics() {
+        val m = _lastMetrics.value
+        _diagnostics.value = _diagnostics.value.copy(
+            lastAudioDurationSec = m?.audioDurationSeconds ?: 0f,
+            lastInferenceDurationMs = m?.durationMs ?: 0L,
+            lastRealTimeFactor = m?.realTimeFactor ?: 0f,
+            lastTranscript = m?.transcript ?: _lastTranscript.value,
+            wakeWordTriggerCount = wakeWordTriggerCount,
+            lastWakeTimestamp = lastWakeTimestamp
+        )
     }
 
     /**
@@ -159,12 +190,17 @@ class AssistantController(
     }
 
     private fun initRecognizerManager(threads: Int) {
-        val recognizer = WhisperSpeechRecognizerManager(modelManager.speechEngine, threadCount = threads)
+        val recognizer = WhisperSpeechRecognizerManager(
+            engine = modelManager.speechEngine,
+            audioCaptureCoordinator = audioCaptureCoordinator,
+            threadCount = threads
+        )
         speechRecognizerManager = recognizer
         scope.launch {
             recognizer.lastMetrics.collect { m ->
                 if (m != null) {
                     _lastMetrics.value = m
+                    updateDiagnostics()
                 }
             }
         }
@@ -199,7 +235,11 @@ class AssistantController(
         wakeWordDetector?.stopSpotting()
         if (!modelManager.isReady()) return
 
-        wakeWordDetector = WakeWordDetector(modelManager.speechEngine) {
+        wakeWordDetector = WakeWordDetector(
+            engine = modelManager.speechEngine,
+            audioCaptureCoordinator = audioCaptureCoordinator,
+            isTtsSpeakingProvider = { audioFeedbackManager.isSpeaking() }
+        ) {
             scope.launch {
                 onWakeWordDetected()
             }
@@ -209,6 +249,9 @@ class AssistantController(
     }
 
     private fun onWakeWordDetected() {
+        wakeWordTriggerCount++
+        lastWakeTimestamp = System.currentTimeMillis()
+        updateDiagnostics()
         audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.WAKE_WORD_DETECTED)
         startCommandListening(prompt = "Hey, I'm listening.")
     }
@@ -237,19 +280,22 @@ class AssistantController(
                 initRecognizerManager(threads)
             }
             speechRecognizerManager?.setListener(this@AssistantController)
-            speechRecognizerManager?.startListening(timeoutMs = 8000)
+            speechRecognizerManager?.startListening(timeoutMs = 12000)
         }
     }
 
     override fun onPartialResult(partialText: String) {
         _lastTranscript.value = partialText
-        if (_state.value is AssistantState.ListeningForCommand) {
+        if (partialText.contains("Transcribing", ignoreCase = true)) {
+            _state.value = AssistantState.Transcribing(_lastMetrics.value?.audioDurationSeconds ?: 0f)
+        } else if (_state.value is AssistantState.ListeningForCommand) {
             _state.value = AssistantState.ListeningForCommand(partialText)
         }
     }
 
     override fun onFinalResult(text: String) {
         _lastTranscript.value = text
+        _state.value = AssistantState.ProcessingCommand(text)
         speechRecognizerManager?.stopListening()
 
         if (isListeningForConfirmation) {
@@ -260,6 +306,7 @@ class AssistantController(
     }
 
     override fun onError(errorMessage: String) {
+        _diagnostics.value = _diagnostics.value.copy(lastError = errorMessage)
         audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
         _state.value = AssistantState.Error(errorMessage)
         resumeStandbyAfterDelay(3500)
@@ -268,7 +315,7 @@ class AssistantController(
     override fun onTimeout() {
         if (isListeningForConfirmation) {
             cancelCurrentInteraction("Confirmation timed out")
-        } else if (_state.value is AssistantState.ListeningForCommand) {
+        } else if (_state.value is AssistantState.ListeningForCommand || _state.value is AssistantState.Transcribing) {
             cancelCurrentInteraction("No command heard")
         }
     }
@@ -545,6 +592,7 @@ class AssistantController(
     fun destroy() {
         stopAssistant()
         audioFeedbackManager.release()
+        audioCaptureCoordinator.cancelCapture()
         speechRecognizerManager?.destroy()
         speechRecognizerManager = null
         wakeWordDetector?.destroy()

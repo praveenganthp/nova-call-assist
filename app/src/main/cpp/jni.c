@@ -162,8 +162,8 @@ Java_com_whispercpp_whisper_WhisperLib_00024Companion_freeContext(
 }
 
 JNIEXPORT void JNICALL
-Java_com_whispercpp_whisper_WhisperLib_00024Companion_fullTranscribe(
-        JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads, jfloatArray audio_data) {
+Java_com_whispercpp_whisper_WhisperLib_00024Companion_fullTranscribeWithPrompt(
+        JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads, jfloatArray audio_data, jstring initial_prompt) {
     UNUSED(thiz);
     struct whisper_context *context = (struct whisper_context *) context_ptr;
     jfloat *audio_data_arr = (*env)->GetFloatArrayElements(env, audio_data, NULL);
@@ -182,15 +182,32 @@ Java_com_whispercpp_whisper_WhisperLib_00024Companion_fullTranscribe(
     params.no_context = true;
     params.single_segment = false;
 
+    const char *prompt_chars = NULL;
+    if (initial_prompt != NULL) {
+        prompt_chars = (*env)->GetStringUTFChars(env, initial_prompt, NULL);
+        params.initial_prompt = prompt_chars;
+    }
+
     whisper_reset_timings(context);
 
-    LOGI("About to run whisper_full");
+    LOGI("About to run whisper_full (prompt: %s)", prompt_chars ? prompt_chars : "(none)");
     if (whisper_full(context, params, audio_data_arr, audio_data_length) != 0) {
         LOGI("Failed to run the model");
     } else {
         whisper_print_timings(context);
     }
+
+    if (prompt_chars != NULL) {
+        (*env)->ReleaseStringUTFChars(env, initial_prompt, prompt_chars);
+    }
     (*env)->ReleaseFloatArrayElements(env, audio_data, audio_data_arr, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
+Java_com_whispercpp_whisper_WhisperLib_00024Companion_fullTranscribe(
+        JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads, jfloatArray audio_data) {
+    Java_com_whispercpp_whisper_WhisperLib_00024Companion_fullTranscribeWithPrompt(
+        env, thiz, context_ptr, num_threads, audio_data, NULL);
 }
 
 JNIEXPORT jint JNICALL

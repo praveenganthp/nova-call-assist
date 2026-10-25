@@ -4,6 +4,8 @@ import android.util.Log
 import com.whispercpp.whisper.WhisperContext
 import com.whispercpp.whisper.WhisperCpuConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -17,6 +19,7 @@ class WhisperSpeechEngine : SpeechRecognitionEngine {
         private const val TAG = "WhisperSpeechEngine"
     }
 
+    private val inferenceMutex = Mutex()
     private var whisperContext: WhisperContext? = null
     private var currentModelPath: String? = null
 
@@ -51,24 +54,34 @@ class WhisperSpeechEngine : SpeechRecognitionEngine {
     override suspend fun transcribe(
         audioData: FloatArray,
         threads: Int?,
-        printTimestamps: Boolean
+        printTimestamps: Boolean,
+        prompt: String?
     ): String = withContext(Dispatchers.Default) {
-        val ctx = whisperContext ?: throw IllegalStateException("WhisperSpeechEngine is not initialized.")
-        val numThreads = threads ?: WhisperCpuConfig.preferredThreadCount
-        val rawText = ctx.transcribeData(audioData, printTimestamp = printTimestamps, threads = numThreads)
-        cleanWhisperTranscript(rawText)
+        inferenceMutex.withLock {
+            val ctx = whisperContext ?: throw IllegalStateException("WhisperSpeechEngine is not initialized.")
+            val numThreads = threads ?: WhisperCpuConfig.preferredThreadCount
+            val rawText = ctx.transcribeData(
+                audioData,
+                printTimestamp = printTimestamps,
+                threads = numThreads,
+                prompt = prompt
+            )
+            cleanWhisperTranscript(rawText)
+        }
     }
 
     override suspend fun benchmark(threads: Int): EngineBenchmarkResult = withContext(Dispatchers.Default) {
-        val ctx = whisperContext ?: throw IllegalStateException("Whisper context not initialized.")
-        val memBench = ctx.benchMemory(threads)
-        val mulMatBench = ctx.benchGgmlMulMat(threads)
-        val sysInfo = WhisperContext.getSystemInfo()
-        EngineBenchmarkResult(
-            memoryBandwidth = memBench,
-            ggmlMulMat = mulMatBench,
-            systemInfo = sysInfo
-        )
+        inferenceMutex.withLock {
+            val ctx = whisperContext ?: throw IllegalStateException("Whisper context not initialized.")
+            val memBench = ctx.benchMemory(threads)
+            val mulMatBench = ctx.benchGgmlMulMat(threads)
+            val sysInfo = WhisperContext.getSystemInfo()
+            EngineBenchmarkResult(
+                memoryBandwidth = memBench,
+                ggmlMulMat = mulMatBench,
+                systemInfo = sysInfo
+            )
+        }
     }
 
     override fun release() {

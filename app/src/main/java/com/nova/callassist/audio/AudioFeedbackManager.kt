@@ -6,6 +6,7 @@ import android.media.ToneGenerator
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Manages text-to-speech voice responses and audible chimes.
@@ -19,6 +20,12 @@ class AudioFeedbackManager(
     private var tts: TextToSpeech? = null
     private var isTtsReady: Boolean = false
     private var toneGenerator: ToneGenerator? = null
+    private val _isSpeaking = AtomicBoolean(false)
+
+    /**
+     * True if TTS is currently synthesizing or playing spoken audio.
+     */
+    fun isSpeaking(): Boolean = _isSpeaking.get() || (tts?.isSpeaking == true)
 
     init {
         try {
@@ -56,17 +63,20 @@ class AudioFeedbackManager(
 
         if (isTtsReady && tts != null) {
             val utteranceId = "nova_speech_${System.currentTimeMillis()}"
-            if (onDone != null) {
-                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(id: String?) {}
-                    override fun onDone(id: String?) {
-                        if (id == utteranceId) onDone()
-                    }
-                    override fun onError(id: String?) {
-                        if (id == utteranceId) onDone()
-                    }
-                })
-            }
+            _isSpeaking.set(true)
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(id: String?) {
+                    _isSpeaking.set(true)
+                }
+                override fun onDone(id: String?) {
+                    _isSpeaking.set(false)
+                    if (id == utteranceId) onDone?.invoke()
+                }
+                override fun onError(id: String?) {
+                    _isSpeaking.set(false)
+                    if (id == utteranceId) onDone?.invoke()
+                }
+            })
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         } else {
             // TTS not available, play sound cue and invoke completion
@@ -79,6 +89,7 @@ class AudioFeedbackManager(
      * Stops any currently playing speech.
      */
     fun stop() {
+        _isSpeaking.set(false)
         try {
             tts?.stop()
         } catch (e: Exception) {

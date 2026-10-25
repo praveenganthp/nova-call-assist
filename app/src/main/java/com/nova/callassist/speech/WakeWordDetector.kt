@@ -1,9 +1,5 @@
 package com.nova.callassist.speech
 
-import android.annotation.SuppressLint
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -12,34 +8,35 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.sqrt
 
 /**
  * Keyword-spotting detector for "Hey Nova".
  *
  * Implements low-power, privacy-preserving on-device wake-word detection:
- * 1. Continually samples microphone audio at 16 kHz mono in a circular ring buffer.
- * 2. Uses VAD / Voice Activity Energy (RMS) gating so NO neural inference runs during silence (0% CPU).
- * 3. Only when human speech energy is detected, extracts a 1.2-second window and performs quick local spotting.
- * 4. Triggers [onWakeWordDetected] with debouncing.
+ * 1. Driven by [AudioCaptureCoordinator] to prevent microphone contention.
+ * 2. Uses adaptive VAD / Voice Activity Energy gating so NO neural inference runs during silence (0% CPU).
+ * 3. Only when human speech energy is detected, extracts a candidate utterance window (1.0–1.8s)
+ *    and runs targeted Whisper transcription primed with the wake phrase prompt.
+ * 4. Triggers [onWakeWordDetected] with debouncing and TTS feedback suppression.
  */
 class WakeWordDetector(
     private val engine: SpeechRecognitionEngine,
+    private val audioCaptureCoordinator: AudioCaptureCoordinator,
+    private val isTtsSpeakingProvider: () -> Boolean = { false },
     private val onWakeWordDetected: () -> Unit
 ) {
 
     companion object {
         private const val TAG = "WakeWordDetector"
-        private const val SAMPLE_RATE = 16000
-        private const val BUFFER_SECONDS = 1.5f
-        private const val WINDOW_SAMPLES = (SAMPLE_RATE * BUFFER_SECONDS).toInt()
-        private const val VOICE_ENERGY_THRESHOLD = 500.0
-        private const val DEBOUNCE_COOLDOWN_MS = 2500L
+        const val SAMPLE_RATE = 16000
+        const val DEBOUNCE_COOLDOWN_MS = 2500L
+        const val MIN_UTTERANCE_MS = 300L
+        const val MAX_UTTERANCE_MS = 2000L
+        const val WAKE_PROMPT = "Hey Nova, Nova, Hi Nova, Hello Nova, Okay Nova."
 
-        private val WAKE_PHRASES = listOf(
+        val WAKE_PHRASES = listOf(
             "hey nova",
             "nova",
             "hi nova",
@@ -47,151 +44,164 @@ class WakeWordDetector(
             "ok nova",
             "okay nova",
             "hey noah",
-            "noah"
+            "noah",
+            "hey nora",
+            "nora"
         )
+
+        /**
+         * Normalizes transcript and tests against known wake-word phrase variants.
+         */
+        fun matchesWakeWord(transcript: String): Boolean {
+            val clean = transcript.lowercase().trim()
+                .replace(Regex("[^a-z\\s]"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+            if (clean.isEmpty()) return false
+
+            return WAKE_PHRASES.any { phrase ->
+                clean == phrase || clean.startsWith("$phrase ") || clean.endsWith(" $phrase") || clean.contains(" $phrase ")
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val isSpotting = AtomicBoolean(false)
-    private var spottingJob: Job? = null
     private var lastWakeTime: Long = 0L
 
-    @SuppressLint("MissingPermission")
+    // Utterance accumulation state
+    private val preRollBuffer = PreRollBuffer(capacity = (SAMPLE_RATE * 0.35f).toInt()) // 350ms pre-roll
+    private val currentCandidateSamples = ArrayList<Short>(SAMPLE_RATE * 2)
+    private var voiceActive = false
+    private var voiceStartTime = 0L
+    private var lastVoiceTime = 0L
+    private var isTranscribingCandidate = AtomicBoolean(false)
+
     fun startSpotting() {
         if (isSpotting.get()) return
         if (!engine.isInitialized) {
-            Log.w(TAG, "Cannot start wake-word spotting: Engine is not initialized")
+            Log.w(TAG, "Cannot start wake-word spotting: Whisper engine is not initialized.")
             return
         }
 
         isSpotting.set(true)
+        resetUtteranceState()
 
-        spottingJob = scope.launch {
-            val minBufferSize = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            ).coerceAtLeast(SAMPLE_RATE * 2)
+        audioCaptureCoordinator.startWakeWordMode { chunk, readSize, rms, noiseFloor ->
+            onAudioFrame(chunk, readSize, rms, noiseFloor)
+        }
+        Log.i(TAG, "Wake-word spotting active for 'Hey Nova' (Voice-Gated)")
+    }
 
-            var audioRecord: AudioRecord? = null
-            try {
-                audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    minBufferSize
-                )
+    private fun onAudioFrame(chunk: ShortArray, readSize: Int, rms: Double, noiseFloor: Double) {
+        if (!isSpotting.get()) return
 
-                if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                    isSpotting.set(false)
-                    Log.e(TAG, "AudioRecord failed to initialize for wake word")
-                    return@launch
+        // Always feed pre-roll ring buffer
+        preRollBuffer.write(chunk, readSize)
+
+        // If TTS is currently speaking, suppress wake word detection so the assistant does not trigger itself
+        if (isTtsSpeakingProvider()) {
+            if (voiceActive) resetUtteranceState()
+            return
+        }
+
+        val dynamicThreshold = (noiseFloor * 2.0 + 100.0).coerceIn(350.0, 1600.0)
+        val continuationThreshold = dynamicThreshold * 0.70
+        val now = SystemClock.elapsedRealtime()
+
+        if (rms > dynamicThreshold) {
+            if (!voiceActive) {
+                voiceActive = true
+                voiceStartTime = now
+                currentCandidateSamples.clear()
+                // Prepend pre-roll audio so "Hey" is never clipped
+                val preRoll = preRollBuffer.getSamples()
+                for (s in preRoll) {
+                    currentCandidateSamples.add(s)
                 }
+            }
+            lastVoiceTime = now
+        }
 
-                audioRecord.startRecording()
-                Log.i(TAG, "Wake-word spotting active for 'Hey Nova' (Voice-Gated)")
+        if (voiceActive) {
+            for (i in 0 until readSize) {
+                currentCandidateSamples.add(chunk[i])
+            }
 
-                val readChunk = ShortArray(1600) // 100 ms chunks
-                val ringBuffer = ShortArray(WINDOW_SAMPLES)
-                var ringIndex = 0
-                var totalSamplesAccumulated = 0
+            val speechDuration = lastVoiceTime - voiceStartTime
+            val trailingSilence = now - lastVoiceTime
 
-                var voiceDetected = false
-                var voiceStartTime = 0L
+            // Check if utterance just ended (silence of 250ms)
+            if (trailingSilence >= 250L) {
+                voiceActive = false
 
-                while (isSpotting.get() && isActive) {
-                    val read = audioRecord.read(readChunk, 0, readChunk.size)
-                    if (read > 0) {
-                        for (i in 0 until read) {
-                            ringBuffer[ringIndex] = readChunk[i]
-                            ringIndex = (ringIndex + 1) % WINDOW_SAMPLES
-                        }
-                        totalSamplesAccumulated += read
-
-                        val rms = calculateRms(readChunk, read)
-                        val now = SystemClock.elapsedRealtime()
-
-                        if (rms > VOICE_ENERGY_THRESHOLD) {
-                            if (!voiceDetected) {
-                                voiceDetected = true
-                                voiceStartTime = now
-                            }
-                        } else if (voiceDetected && (now - voiceStartTime >= 800L)) {
-                            // Voice utterance just finished and we have at least 800ms of audio
-                            voiceDetected = false
-                            if (totalSamplesAccumulated >= WINDOW_SAMPLES && (now - lastWakeTime > DEBOUNCE_COOLDOWN_MS)) {
-                                val windowData = FloatArray(WINDOW_SAMPLES)
-                                for (i in 0 until WINDOW_SAMPLES) {
-                                    val idx = (ringIndex + i) % WINDOW_SAMPLES
-                                    windowData[i] = ringBuffer[idx] / 32768.0f
-                                }
-
-                                try {
-                                    // Quick 2-thread transcription of 1.5s window
-                                    val transcript = engine.transcribe(windowData, threads = 2)
-                                    Log.d(TAG, "Wake spot transcript: \"$transcript\"")
-                                    if (matchesWakeWord(transcript)) {
-                                        lastWakeTime = SystemClock.elapsedRealtime()
-                                        Log.i(TAG, "Wake word detected: \"$transcript\"")
-                                        mainHandler.post {
-                                            stopSpotting()
-                                            onWakeWordDetected()
-                                        }
-                                        break
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Wake transcribe error: ${e.message}")
-                                }
-                            }
-                        }
-                    }
+                if (speechDuration in MIN_UTTERANCE_MS..MAX_UTTERANCE_MS &&
+                    (now - lastWakeTime > DEBOUNCE_COOLDOWN_MS) &&
+                    !isTranscribingCandidate.get()
+                ) {
+                    val candidateCopy = ShortArray(currentCandidateSamples.size) { currentCandidateSamples[it] }
+                    currentCandidateSamples.clear()
+                    evaluateWakeCandidate(candidateCopy)
+                } else {
+                    currentCandidateSamples.clear()
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in wake-word detection loop: ${e.message}", e)
-            } finally {
-                try {
-                    audioRecord?.stop()
-                    audioRecord?.release()
-                } catch (e: Exception) {
-                    // Ignore cleanup exceptions
-                }
+            } else if ((now - voiceStartTime) > MAX_UTTERANCE_MS + 500L) {
+                // Speech is too long to be a wake word (e.g. continuous conversation), discard
+                resetUtteranceState()
             }
         }
     }
 
+    private fun evaluateWakeCandidate(samples: ShortArray) {
+        if (!engine.isInitialized || samples.isEmpty()) return
+
+        isTranscribingCandidate.set(true)
+        scope.launch {
+            try {
+                val floatData = AudioMath.shortArrayToNormalizedFloat(samples)
+                val transcript = engine.transcribe(
+                    floatData,
+                    threads = 2,
+                    prompt = WAKE_PROMPT
+                )
+                Log.d(TAG, "Wake candidate transcribed: \"$transcript\" (${samples.size} samples)")
+
+                if (matchesWakeWord(transcript)) {
+                    lastWakeTime = SystemClock.elapsedRealtime()
+                    Log.i(TAG, "Wake word triggered: \"$transcript\"!")
+                    mainHandler.post {
+                        stopSpotting()
+                        onWakeWordDetected()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error evaluating wake candidate: ${e.message}")
+            } finally {
+                isTranscribingCandidate.set(false)
+            }
+        }
+    }
+
+    private fun resetUtteranceState() {
+        voiceActive = false
+        voiceStartTime = 0L
+        lastVoiceTime = 0L
+        currentCandidateSamples.clear()
+    }
+
     fun stopSpotting() {
-        isSpotting.set(false)
-        spottingJob?.cancel()
-        spottingJob = null
+        if (isSpotting.compareAndSet(true, false)) {
+            resetUtteranceState()
+            audioCaptureCoordinator.stopCapture()
+        }
     }
 
     fun isSpotting(): Boolean = isSpotting.get()
 
     fun destroy() {
         stopSpotting()
-    }
-
-    private fun matchesWakeWord(transcript: String): Boolean {
-        val clean = transcript.lowercase().trim()
-            .replace(Regex("[^a-z\\s]"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-
-        return WAKE_PHRASES.any { phrase ->
-            clean == phrase || clean.contains(phrase)
-        }
-    }
-
-    private fun calculateRms(buffer: ShortArray, readSize: Int): Double {
-        if (readSize <= 0) return 0.0
-        var sum = 0.0
-        for (i in 0 until readSize) {
-            val sample = buffer[i].toDouble()
-            sum += sample * sample
-        }
-        return sqrt(sum / readSize)
     }
 }

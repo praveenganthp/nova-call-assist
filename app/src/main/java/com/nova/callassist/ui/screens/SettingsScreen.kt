@@ -89,6 +89,7 @@ fun SettingsScreen(
     val cpuThreads by settingsRepository.cpuThreads.collectAsState(initial = 4)
     val modelStatus by modelManager.status.collectAsState()
     val lastMetrics by controller.lastMetrics.collectAsState()
+    val diagnostics by controller.diagnostics.collectAsState()
 
     var benchmarkResult by remember { mutableStateOf<EngineBenchmarkResult?>(null) }
     var isBenchmarking by remember { mutableStateOf(false) }
@@ -198,6 +199,7 @@ fun SettingsScreen(
                 WhisperDiagnosticsCard(
                     modelStatus = modelStatus,
                     lastMetrics = lastMetrics,
+                    diagnostics = diagnostics,
                     cpuThreads = cpuThreads,
                     onThreadsChanged = { threads ->
                         coroutineScope.launch {
@@ -412,6 +414,7 @@ private fun ModelStatusCard(
 private fun WhisperDiagnosticsCard(
     modelStatus: SpeechModelManager.ModelStatus,
     lastMetrics: com.nova.callassist.speech.TranscriptionMetrics?,
+    diagnostics: com.nova.callassist.assistant.AssistantDiagnostics,
     cpuThreads: Int,
     onThreadsChanged: (Int) -> Unit,
     isBenchmarking: Boolean,
@@ -436,13 +439,92 @@ private fun WhisperDiagnosticsCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Whisper Engine Diagnostics",
+                    text = "System Diagnostics & Telemetry",
                     color = TextPrimary,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
+
+            // Audio Record Hardware & VAD State
+            Text(
+                text = "AUDIO CAPTURE & HARDWARE STATE",
+                color = TextTertiary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text(text = "Mic Session", color = TextSecondary, fontSize = 12.sp)
+                    Text(
+                        text = diagnostics.audioRecordStatus,
+                        color = BlueAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Column {
+                    Text(text = "Speech Onset", color = TextSecondary, fontSize = 12.sp)
+                    Text(
+                        text = if (diagnostics.speechOnsetDetected) "Detected" else "Silent / Waiting",
+                        color = if (diagnostics.speechOnsetDetected) EmeraldGreen else TextSecondary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Column {
+                    Text(text = "Energy (RMS)", color = TextSecondary, fontSize = 12.sp)
+                    Text(
+                        text = "${"%.0f".format(diagnostics.currentRms)}",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Wake-Word Telemetry
+            Text(
+                text = "WAKE-WORD (\"HEY NOVA\") TELEMETRY",
+                color = TextTertiary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text(text = "Triggers Count", color = TextSecondary, fontSize = 12.sp)
+                    Text(
+                        text = "${diagnostics.wakeWordTriggerCount} times",
+                        color = BlueAccent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Column {
+                    Text(text = "Last Wake Timestamp", color = TextSecondary, fontSize = 12.sp)
+                    val lastWakeStr = if (diagnostics.lastWakeTimestamp > 0) {
+                        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                            .format(java.util.Date(diagnostics.lastWakeTimestamp))
+                    } else {
+                        "None yet"
+                    }
+                    Text(
+                        text = lastWakeStr,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // CPU Thread Count Selector
             Text(
@@ -512,6 +594,14 @@ private fun WhisperDiagnosticsCard(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+                if (lastMetrics.transcript.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Transcript: \"${lastMetrics.transcript}\"",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
                 }
             } else {
                 Text(

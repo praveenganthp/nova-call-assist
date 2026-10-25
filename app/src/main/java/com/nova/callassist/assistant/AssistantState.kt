@@ -26,6 +26,20 @@ sealed class AssistantState {
     ) : AssistantState()
 
     /**
+     * Speech recording has completed; on-device Whisper neural inference is executing.
+     */
+    data class Transcribing(
+        val audioDurationSeconds: Float = 0f
+    ) : AssistantState()
+
+    /**
+     * Speech transcribed; parsing spoken intent and resolving actions.
+     */
+    data class ProcessingCommand(
+        val transcript: String
+    ) : AssistantState()
+
+    /**
      * Processing a recognized speech command and matching against contacts.
      */
     data class MatchingContact(

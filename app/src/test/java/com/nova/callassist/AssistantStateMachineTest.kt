@@ -97,4 +97,26 @@ class AssistantStateMachineTest {
         assertTrue(state is AssistantState.PermissionRequired)
         assertEquals(1, (state as AssistantState.PermissionRequired).missingPermissions.size)
     }
+
+    @Test
+    fun testCompleteStateProgression() {
+        // IDLE -> LISTENING_FOR_COMMAND -> TRANSCRIBING -> PROCESSING_COMMAND -> AWAITING_CONFIRMATION
+        var state: AssistantState = AssistantState.Idle
+        assertEquals(AssistantState.Idle, state)
+
+        state = AssistantState.ListeningForCommand(partialTranscript = "Hearing speech…")
+        assertTrue(state is AssistantState.ListeningForCommand)
+
+        state = AssistantState.Transcribing(audioDurationSeconds = 2.4f)
+        assertTrue(state is AssistantState.Transcribing)
+        assertEquals(2.4f, (state as AssistantState.Transcribing).audioDurationSeconds, 0.01f)
+
+        state = AssistantState.ProcessingCommand(transcript = "Call Arun")
+        assertTrue(state is AssistantState.ProcessingCommand)
+        assertEquals("Call Arun", (state as AssistantState.ProcessingCommand).transcript)
+
+        val contact = ContactModel("1", "k1", "Arun Kumar", listOf(PhoneNumber("+919876543210", "Mobile")))
+        state = AssistantState.AwaitingConfirmation(contact, contact.phoneNumbers.first(), 0.95f)
+        assertTrue(state is AssistantState.AwaitingConfirmation)
+    }
 }

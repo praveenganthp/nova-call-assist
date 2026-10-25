@@ -191,6 +191,8 @@ fun MainScreen(
                     text = when (state) {
                         is AssistantState.ListeningForWakeWord -> "Say \"Hey Nova\" or tap the microphone"
                         is AssistantState.ListeningForCommand -> "Say \"Call [Contact Name]\""
+                        is AssistantState.Transcribing -> "Transcribing your voice with Whisper…"
+                        is AssistantState.ProcessingCommand -> "Processing: \"${(state as AssistantState.ProcessingCommand).transcript}\""
                         is AssistantState.AwaitingConfirmation -> "Say \"Yes\" to confirm, or \"Cancel\""
                         is AssistantState.AmbiguousMatches -> "Say the contact's full name or select below"
                         is AssistantState.Error -> "Check contact name or retry"
@@ -549,6 +551,8 @@ private fun TranscriptCard(
                     "\"$transcript\""
                 } else if (state is AssistantState.ListeningForCommand) {
                     "Listening for your command…"
+                } else if (state is AssistantState.Transcribing) {
+                    "Transcribing voice with Whisper…"
                 } else {
                     "No recent voice command."
                 },

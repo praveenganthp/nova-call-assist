@@ -1,8 +1,11 @@
 package com.nova.callassist
 
+import com.nova.callassist.speech.AudioMath
 import com.nova.callassist.speech.EngineBenchmarkResult
+import com.nova.callassist.speech.PreRollBuffer
 import com.nova.callassist.speech.SpeechRecognitionEngine
 import com.nova.callassist.speech.TranscriptionMetrics
+import com.nova.callassist.speech.WakeWordDetector
 import com.nova.callassist.speech.WhisperSpeechRecognizerManager
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -27,7 +30,8 @@ class WhisperMigrationTest {
         override suspend fun transcribe(
             audioData: FloatArray,
             threads: Int?,
-            printTimestamps: Boolean
+            printTimestamps: Boolean,
+            prompt: String?
         ): String {
             return transcribedResponse
         }
@@ -148,11 +152,189 @@ class WhisperMigrationTest {
         )
 
         for (phrase in invalidPhrases) {
-            val clean = phrase.lowercase().trim()
-            val matches = listOf("hey nova", "nova", "hi nova", "hello nova", "ok nova", "okay nova", "hey noah", "noah")
-                .any { clean == it || clean.contains(it) }
-
+            val matches = WakeWordDetector.matchesWakeWord(phrase)
             assertFalse("Phrase '$phrase' should NOT match wake word", matches)
         }
+    }
+
+    @Test
+    fun testPreRollBufferPreservesInitialSamples() {
+        val capacity = 6400 // 400ms at 16kHz
+        val buffer = PreRollBuffer(capacity)
+
+        // Write 3 chunks of 3200 samples each (total 9600 samples)
+        // Values: chunk 1 has 1s, chunk 2 has 2s, chunk 3 has 3s
+        val chunk1 = ShortArray(3200) { 1 }
+        val chunk2 = ShortArray(3200) { 2 }
+        val chunk3 = ShortArray(3200) { 3 }
+
+        buffer.write(chunk1, chunk1.size)
+        buffer.write(chunk2, chunk2.size)
+        buffer.write(chunk3, chunk3.size)
+
+        val retrieved = buffer.getSamples()
+        assertEquals(capacity, retrieved.size)
+
+        // The oldest 3200 (chunk 1) was overwritten.
+        // Retrieved should have exactly chunk 2 (first 3200) followed by chunk 3 (last 3200).
+        assertEquals(2.toShort(), retrieved[0])
+        assertEquals(2.toShort(), retrieved[3199])
+        assertEquals(3.toShort(), retrieved[3200])
+        assertEquals(3.toShort(), retrieved[6399])
+    }
+
+    @Test
+    fun testAdaptiveNoiseFloorAndDynamicThreshold() {
+        // Quiet room
+        val quietFloor = 40.0
+        val quietThreshold = AudioMath.computeDynamicThreshold(quietFloor)
+        assertEquals(AudioMath.MIN_DYNAMIC_THRESHOLD, quietThreshold, 0.001)
+
+        val quietContinuation = AudioMath.computeContinuationThreshold(quietThreshold)
+        assertEquals(210.0, quietContinuation, 0.001)
+
+        // Noisy room with fan noise (RMS = 500)
+        val noisyFloor = 500.0
+        val noisyThreshold = AudioMath.computeDynamicThreshold(noisyFloor)
+        assertEquals(1250.0, noisyThreshold, 0.001)
+
+        val noisyContinuation = AudioMath.computeContinuationThreshold(noisyThreshold)
+        assertEquals(875.0, noisyContinuation, 0.001)
+
+        // Noise floor adaptation
+        var floor = 100.0
+        // Quieter chunk adapts floor downwards
+        floor = AudioMath.updateNoiseFloor(floor, 50.0)
+        assertTrue("Noise floor should adapt downward", floor < 100.0)
+
+        // Louder chunk adapts floor upwards very slowly
+        val before = floor
+        floor = AudioMath.updateNoiseFloor(floor, 1500.0)
+        assertTrue("Noise floor should increase slightly", floor > before && floor < before + 50.0)
+    }
+
+    @Test
+    fun testSilenceBeforeSpeechDoesNotFinishRecordingPrematurely() {
+        val dynamicThreshold = 300.0
+        val continuationThreshold = AudioMath.computeContinuationThreshold(dynamicThreshold)
+
+        var speechStarted = false
+        var speechStartTime = 0L
+        var lastVoiceTime = 0L
+        var recordingFinished = false
+
+        // Simulate 20 chunks of 100ms silence (total 2000ms silence)
+        var simulatedTime = 0L
+        for (step in 1..20) {
+            simulatedTime += 100L
+            val rms = 60.0 // silence
+
+            if (rms > dynamicThreshold) {
+                if (!speechStarted) {
+                    speechStarted = true
+                    speechStartTime = simulatedTime
+                }
+                lastVoiceTime = simulatedTime
+            }
+
+            if (speechStarted) {
+                val silenceDuration = simulatedTime - lastVoiceTime
+                val speechDuration = lastVoiceTime - speechStartTime
+                if (speechDuration >= AudioMath.MIN_SPEECH_DURATION_MS &&
+                    silenceDuration >= AudioMath.TRAILING_SILENCE_WINDOW_MS
+                ) {
+                    recordingFinished = true
+                    break
+                }
+            }
+        }
+
+        assertFalse("Silence before speech should NOT mark speechStarted", speechStarted)
+        assertFalse("Silence before speech should NOT finish recording prematurely", recordingFinished)
+    }
+
+    @Test
+    fun testSpeechFollowedBySilenceTriggersRecordingCompletion() {
+        val dynamicThreshold = 300.0
+
+        var speechStarted = false
+        var speechStartTime = 0L
+        var lastVoiceTime = 0L
+        var recordingFinished = false
+        var finishTime = 0L
+
+        var simulatedTime = 0L
+
+        // Phase 1: 300ms initial silence (3 chunks)
+        for (i in 1..3) {
+            simulatedTime += 100L
+            val rms = 50.0
+            if (rms > dynamicThreshold) {
+                if (!speechStarted) { speechStarted = true; speechStartTime = simulatedTime }
+                lastVoiceTime = simulatedTime
+            }
+        }
+        assertFalse(speechStarted)
+
+        // Phase 2: 800ms speech "Call Arun" (8 chunks, rms = 1200)
+        for (i in 1..8) {
+            simulatedTime += 100L
+            val rms = 1200.0
+            if (rms > dynamicThreshold) {
+                if (!speechStarted) { speechStarted = true; speechStartTime = simulatedTime }
+                lastVoiceTime = simulatedTime
+            }
+        }
+        assertTrue("Speech onset must be confirmed", speechStarted)
+        assertEquals(400L, speechStartTime)
+        assertEquals(1100L, lastVoiceTime)
+
+        // Phase 3: Trailing silence (10 chunks of 100ms = 1000ms)
+        for (i in 1..15) {
+            simulatedTime += 100L
+            val rms = 50.0 // silence
+
+            if (speechStarted) {
+                val silenceDuration = simulatedTime - lastVoiceTime
+                val speechDuration = lastVoiceTime - speechStartTime
+                if (speechDuration >= AudioMath.MIN_SPEECH_DURATION_MS &&
+                    silenceDuration >= AudioMath.TRAILING_SILENCE_WINDOW_MS
+                ) {
+                    recordingFinished = true
+                    finishTime = simulatedTime
+                    break
+                }
+            }
+        }
+
+        assertTrue("Speech followed by 1000ms trailing silence MUST finish recording", recordingFinished)
+        assertEquals("Should complete at exactly 1000ms after last speech frame", 2100L, finishTime)
+    }
+
+    @Test
+    fun testHardMaxDurationTriggersCompletion() {
+        var speechStarted = false
+        var speechStartTime = 0L
+        var recordingFinished = false
+
+        var simulatedTime = 0L
+
+        // Continuous speech for 13 seconds
+        for (i in 1..130) {
+            simulatedTime += 100L
+            val rms = 1000.0 // continuous speech
+            if (!speechStarted) {
+                speechStarted = true
+                speechStartTime = simulatedTime
+            }
+
+            if (speechStarted && (simulatedTime - speechStartTime) >= AudioMath.HARD_MAX_RECORDING_MS) {
+                recordingFinished = true
+                break
+            }
+        }
+
+        assertTrue("Hard maximum recording duration (12s) MUST trigger completion", recordingFinished)
+        assertEquals(12100L, simulatedTime)
     }
 }

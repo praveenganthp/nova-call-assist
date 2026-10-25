@@ -33,7 +33,8 @@ interface SpeechRecognitionEngine {
     suspend fun transcribe(
         audioData: FloatArray,
         threads: Int? = null,
-        printTimestamps: Boolean = false
+        printTimestamps: Boolean = false,
+        prompt: String? = null
     ): String
 
     /**
