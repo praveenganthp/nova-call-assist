@@ -79,6 +79,7 @@ class WakeWordDetector(
     private var voiceStartTime = 0L
     private var lastVoiceTime = 0L
     private var isTranscribingCandidate = AtomicBoolean(false)
+    private var candidateJob: Job? = null
 
     fun startSpotting() {
         if (isSpotting.get()) return
@@ -159,7 +160,7 @@ class WakeWordDetector(
         if (!engine.isInitialized || samples.isEmpty()) return
 
         isTranscribingCandidate.set(true)
-        scope.launch {
+        candidateJob = scope.launch {
             try {
                 val floatData = AudioMath.shortArrayToNormalizedFloat(samples)
                 val transcript = engine.transcribe(
@@ -177,6 +178,8 @@ class WakeWordDetector(
                         onWakeWordDetected()
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                Log.d(TAG, "Wake candidate evaluation cancelled.")
             } catch (e: Exception) {
                 Log.w(TAG, "Error evaluating wake candidate: ${e.message}")
             } finally {
@@ -194,6 +197,9 @@ class WakeWordDetector(
 
     fun stopSpotting() {
         if (isSpotting.compareAndSet(true, false)) {
+            candidateJob?.cancel()
+            candidateJob = null
+            isTranscribingCandidate.set(false)
             resetUtteranceState()
             audioCaptureCoordinator.stopCapture()
         }

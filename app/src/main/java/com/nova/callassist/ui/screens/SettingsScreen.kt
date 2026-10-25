@@ -58,6 +58,7 @@ import com.nova.callassist.assistant.AssistantController
 import com.nova.callassist.settings.SettingsRepository
 import com.nova.callassist.speech.EngineBenchmarkResult
 import com.nova.callassist.speech.SpeechModelManager
+import com.nova.callassist.speech.WhisperModelOption
 import com.nova.callassist.ui.theme.AmberWarning
 import com.nova.callassist.ui.theme.BlueAccent
 import com.nova.callassist.ui.theme.BluePrimary
@@ -183,12 +184,14 @@ fun SettingsScreen(
 
                 SectionTitle(title = "WHISPER SPEECH MODEL")
 
-                ModelStatusCard(
+                ModelSelectionSection(
                     modelStatus = modelStatus,
-                    onDownloadClick = {
-                        coroutineScope.launch {
-                            modelManager.downloadAndInstallModel()
-                        }
+                    modelManager = modelManager,
+                    onSelectModel = { option ->
+                        controller.switchModel(option)
+                    },
+                    onDownloadModel = { option ->
+                        controller.triggerModelDownload(option)
                     }
                 )
 
@@ -305,104 +308,182 @@ private fun SettingToggleCard(
 }
 
 @Composable
-private fun ModelStatusCard(
+private fun ModelSelectionSection(
     modelStatus: SpeechModelManager.ModelStatus,
-    onDownloadClick: () -> Unit
+    modelManager: SpeechModelManager,
+    onSelectModel: (WhisperModelOption) -> Unit,
+    onDownloadModel: (WhisperModelOption) -> Unit
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(CardBackground)
-            .border(1.dp, CardBorder, RoundedCornerShape(16.dp))
-            .padding(16.dp)
-    ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.RecordVoiceOver,
-                    contentDescription = null,
-                    tint = BlueAccent,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Whisper Neural Engine Status",
-                    color = TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        WhisperModelOption.values().forEach { option ->
+            val isInstalled = modelManager.isModelInstalled(option)
+            val isOptionActive = modelManager.isReady() && modelManager.getActiveModelOption() == option
+            val isDownloadingThis = modelStatus is SpeechModelManager.ModelStatus.Downloading &&
+                    modelStatus.targetOption == option
 
-            when (modelStatus) {
-                is SpeechModelManager.ModelStatus.Ready -> {
-                    Text(
-                        text = "Model: ${modelStatus.modelName} (Ready)",
-                        color = EmeraldGreen,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(CardBackground)
+                    .border(
+                        width = if (isOptionActive) 1.5.dp else 1.dp,
+                        color = if (isOptionActive) EmeraldGreen else CardBorder,
+                        shape = RoundedCornerShape(16.dp)
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Size: ${"%.1f".format(modelStatus.fileSizeBytes / 1048576f)} MB | Load Latency: ${modelStatus.loadDurationMs} ms",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Path: ${modelStatus.modelPath}",
-                        color = TextTertiary,
-                        fontSize = 11.sp
-                    )
-                }
-                is SpeechModelManager.ModelStatus.Checking -> {
-                    Text(text = "Checking offline Whisper model…", color = TextSecondary, fontSize = 13.sp)
-                }
-                is SpeechModelManager.ModelStatus.Downloading -> {
-                    Text(
-                        text = "Downloading Whisper Tiny (Q5_1): ${modelStatus.progressPercent}% (${modelStatus.bytesDownloaded / 1048576} MB / ${modelStatus.totalBytes / 1048576} MB)",
-                        color = BlueAccent,
-                        fontSize = 13.sp
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    LinearProgressIndicator(
-                        progress = { (modelStatus.progressPercent / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
-                        color = BlueAccent,
-                        trackColor = CardBorder
-                    )
-                }
-                is SpeechModelManager.ModelStatus.NotInstalled, is SpeechModelManager.ModelStatus.Error -> {
-                    Text(
-                        text = if (modelStatus is SpeechModelManager.ModelStatus.Error) {
-                            "Setup error: ${modelStatus.message}"
-                        } else {
-                            "Whisper model not yet installed."
-                        },
-                        color = AmberWarning,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Download the lightweight quantized Whisper Tiny model (31 MB) for high-accuracy Indian English name recognition.",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Button(
-                        onClick = onDownloadClick,
-                        colors = ButtonDefaults.buttonColors(containerColor = BluePrimary),
-                        shape = RoundedCornerShape(8.dp)
+                    .padding(16.dp)
+            ) {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.CloudDownload,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Icon(
+                                imageVector = Icons.Default.RecordVoiceOver,
+                                contentDescription = null,
+                                tint = if (isOptionActive) EmeraldGreen else BlueAccent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = option.displayName,
+                                color = TextPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        // Status Badge
+                        if (isOptionActive) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(EmeraldGreen.copy(alpha = 0.2f))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "ACTIVE",
+                                    color = EmeraldGreen,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else if (isDownloadingThis) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(BlueAccent.copy(alpha = 0.2f))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "DOWNLOADING",
+                                    color = BlueAccent,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else if (isInstalled) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CardBorder)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "INSTALLED",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(CardBorder)
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "${option.approxSizeMb} MB",
+                                    color = TextTertiary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = option.description,
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+
+                    if (isDownloadingThis) {
+                        val dl = modelStatus as SpeechModelManager.ModelStatus.Downloading
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Downloading: ${dl.progressPercent}% (${dl.bytesDownloaded / 1048576} MB / ${dl.totalBytes / 1048576} MB)",
+                            color = BlueAccent,
+                            fontSize = 12.sp
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "Download Whisper Model (31 MB)", fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LinearProgressIndicator(
+                            progress = { (dl.progressPercent / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = BlueAccent,
+                            trackColor = CardBorder
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        if (isInstalled && !isOptionActive) {
+                            OutlinedButton(
+                                onClick = { onSelectModel(option) },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "Switch to ${if (option == WhisperModelOption.BASE_EN) "Base" else "Tiny"} Model",
+                                    color = BlueAccent,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else if (!isInstalled) {
+                            Button(
+                                onClick = { onDownloadModel(option) },
+                                colors = ButtonDefaults.buttonColors(containerColor = BluePrimary),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDownload,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Download ${option.displayName} (${option.approxSizeMb} MB)",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else if (isOptionActive) {
+                            Text(
+                                text = "Currently in use for offline voice recognition and wake-word spotting.",
+                                color = EmeraldGreen,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
             }

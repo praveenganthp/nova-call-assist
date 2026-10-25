@@ -18,6 +18,7 @@ import com.nova.callassist.speech.SpeechRecognitionListener
 import com.nova.callassist.speech.SpeechRecognizerManager
 import com.nova.callassist.speech.TranscriptionMetrics
 import com.nova.callassist.speech.WakeWordDetector
+import com.nova.callassist.speech.WhisperModelOption
 import com.nova.callassist.speech.WhisperSpeechRecognizerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -75,7 +76,9 @@ class AssistantController(
 
     init {
         scope.launch {
-            modelManager.initModel()
+            val prefModelId = settingsRepository.selectedModelId.first()
+            modelManager.initModel(prefModelId)
+            updateDiagnostics()
         }
         scope.launch {
             audioCaptureCoordinator.telemetry.collect { tel ->
@@ -96,6 +99,7 @@ class AssistantController(
             lastAudioDurationSec = m?.audioDurationSeconds ?: 0f,
             lastInferenceDurationMs = m?.durationMs ?: 0L,
             lastRealTimeFactor = m?.realTimeFactor ?: 0f,
+            activeModelName = modelManager.getActiveModelOption().displayName,
             lastTranscript = m?.transcript ?: _lastTranscript.value,
             wakeWordTriggerCount = wakeWordTriggerCount,
             lastWakeTimestamp = lastWakeTimestamp
@@ -165,25 +169,61 @@ class AssistantController(
         }
 
         ensureSpeechEngineReady {
-            startCommandListening(prompt = "Yes, I'm listening.")
+            audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.WAKE_WORD_DETECTED)
+            startCommandListening(prompt = null)
         }
     }
 
     /**
      * Downloads and initializes the offline speech model for non-technical users.
      */
-    fun triggerModelDownload() {
+    fun triggerModelDownload(option: WhisperModelOption = WhisperModelOption.DEFAULT) {
         scope.launch {
-            val result = modelManager.downloadAndInstallModel()
+            val result = modelManager.downloadAndInstallModel(option)
             if (result.isSuccess) {
+                settingsRepository.setSelectedModelId(option.id)
                 val threads = settingsRepository.cpuThreads.first()
                 initRecognizerManager(threads)
+                updateDiagnostics()
                 audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CONFIRMATION_ACK)
-                audioFeedbackManager.speak("Offline Whisper speech model is ready.")
+                audioFeedbackManager.speak("${option.displayName} is ready.")
             } else {
                 audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
                 _state.value = AssistantState.Error(
                     "Model download failed: ${result.exceptionOrNull()?.message ?: "Network error"}"
+                )
+            }
+        }
+    }
+
+    /**
+     * Switches to an already-installed Whisper model safely under mutex lock.
+     */
+    fun switchModel(option: WhisperModelOption) {
+        scope.launch {
+            val wasActive = _isAssistantActive.value
+            if (wasActive) {
+                wakeWordDetector?.stopSpotting()
+                speechRecognizerManager?.stopListening()
+            }
+
+            val result = modelManager.selectAndLoadModel(option)
+            if (result.isSuccess) {
+                settingsRepository.setSelectedModelId(option.id)
+                val threads = settingsRepository.cpuThreads.first()
+                initRecognizerManager(threads)
+                updateDiagnostics()
+                audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CONFIRMATION_ACK)
+                if (wasActive) {
+                    val wakeWordEnabled = settingsRepository.wakeWordEnabled.first()
+                    if (wakeWordEnabled) {
+                        startWakeWordListening()
+                    }
+                }
+            } else {
+                audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
+                _state.value = AssistantState.Error(
+                    "Failed to switch model: ${result.exceptionOrNull()?.message ?: "Unknown error"}"
                 )
             }
         }
@@ -253,7 +293,7 @@ class AssistantController(
         lastWakeTimestamp = System.currentTimeMillis()
         updateDiagnostics()
         audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.WAKE_WORD_DETECTED)
-        startCommandListening(prompt = "Hey, I'm listening.")
+        startCommandListening(prompt = null)
     }
 
     private fun startCommandListening(prompt: String? = null) {
@@ -325,7 +365,7 @@ class AssistantController(
 
         when (command) {
             is CommandParser.Command.Call -> {
-                processCallTarget(command.targetName)
+                processCallTarget(targetName = command.targetName, rawTranscript = transcript)
             }
             is CommandParser.Command.Cancel -> {
                 cancelCurrentInteraction("Cancelled")
@@ -350,17 +390,32 @@ class AssistantController(
                 // Ignore confirm if not awaiting confirmation
             }
             is CommandParser.Command.Unknown -> {
-                processCallTarget(transcript)
+                processCallTarget(targetName = transcript, rawTranscript = transcript)
             }
         }
     }
 
-    private fun processCallTarget(targetName: String) {
+    private fun processCallTarget(targetName: String, rawTranscript: String = targetName) {
         _state.value = AssistantState.MatchingContact(targetName)
 
+        val matchStart = System.currentTimeMillis()
         scope.launch {
             val contacts = contactsRepository.loadContacts()
             val result = contactMatcher.match(targetName, contacts)
+            val matchDuration = System.currentTimeMillis() - matchStart
+
+            // Privacy-preserving debug logging: log raw & parsed target, match result, and latency (no phone numbers or address book dump)
+            android.util.Log.d(
+                "AssistantController",
+                "[MATCH] raw=\"$rawTranscript\", target=\"$targetName\", contactsCount=${contacts.size}, " +
+                        "result=${result::class.simpleName}, matchDurationMs=$matchDuration"
+            )
+
+            val inferenceMs = _lastMetrics.value?.durationMs ?: 0L
+            _diagnostics.value = _diagnostics.value.copy(
+                contactMatchDurationMs = matchDuration,
+                totalLatencyMs = inferenceMs + matchDuration
+            )
 
             when (result) {
                 is MatchResult.Single -> {
@@ -380,7 +435,7 @@ class AssistantController(
                     // Play negative chime to make it unmistakably clear no match was found
                     audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
                     val spokenMsg = "I couldn't find a contact named $targetName."
-                    val uiMsg = "No contact found matching \"$targetName\". Check your contacts list or spelling."
+                    val uiMsg = "No contact found matching \"$targetName\" (Recognized: \"$rawTranscript\"). Check your contacts list or spelling, or choose manually."
                     _state.value = AssistantState.Error(uiMsg)
                     audioFeedbackManager.speak(spokenMsg)
                     resumeStandbyAfterDelay(4500)

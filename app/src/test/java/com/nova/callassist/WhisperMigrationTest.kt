@@ -6,8 +6,16 @@ import com.nova.callassist.speech.PreRollBuffer
 import com.nova.callassist.speech.SpeechRecognitionEngine
 import com.nova.callassist.speech.TranscriptionMetrics
 import com.nova.callassist.speech.WakeWordDetector
+import com.nova.callassist.speech.WhisperModelOption
 import com.nova.callassist.speech.WhisperSpeechRecognizerManager
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -336,5 +344,107 @@ class WhisperMigrationTest {
 
         assertTrue("Hard maximum recording duration (12s) MUST trigger completion", recordingFinished)
         assertEquals(12100L, simulatedTime)
+    }
+
+    @Test
+    fun testWhisperModelOptionMetadataAndLookup() {
+        val tiny = WhisperModelOption.TINY_EN
+        assertEquals("tiny_en", tiny.id)
+        assertEquals("ggml-tiny.en-q5_1.bin", tiny.fileName)
+        assertEquals(31, tiny.approxSizeMb)
+        assertTrue(tiny.expectedSizeBytes > 30_000_000L)
+        assertTrue(tiny.downloadUrl.contains("ggml-tiny.en-q5_1.bin"))
+
+        val base = WhisperModelOption.BASE_EN
+        assertEquals("base_en", base.id)
+        assertEquals("ggml-base.en-q5_1.bin", base.fileName)
+        assertEquals(57, base.approxSizeMb)
+        assertTrue(base.expectedSizeBytes > 55_000_000L)
+        assertTrue(base.downloadUrl.contains("ggml-base.en-q5_1.bin"))
+
+        assertEquals(tiny, WhisperModelOption.fromId("tiny_en"))
+        assertEquals(base, WhisperModelOption.fromId("base_en"))
+        assertEquals(WhisperModelOption.DEFAULT, WhisperModelOption.fromId("unknown_model_id"))
+
+        assertEquals(tiny, WhisperModelOption.fromFileName("ggml-tiny.en-q5_1.bin"))
+        assertEquals(base, WhisperModelOption.fromFileName("ggml-base.en-q5_1.bin"))
+    }
+
+    @Test
+    fun testConcurrentInferenceSchedulingSafety() = runBlocking {
+        // Test that serialized inferenceMutex prevents concurrent native access
+        val mutex = Mutex()
+        var concurrentExecutions = 0
+        var maxConcurrent = 0
+
+        val fakeEngine = object : SpeechRecognitionEngine {
+            override val isInitialized: Boolean = true
+            override val loadedModelPath: String = "test.bin"
+            override suspend fun initialize(modelPath: String): Boolean = true
+            override suspend fun transcribe(
+                audioData: FloatArray,
+                threads: Int?,
+                printTimestamps: Boolean,
+                prompt: String?
+            ): String = mutex.withLock {
+                concurrentExecutions++
+                if (concurrentExecutions > maxConcurrent) {
+                    maxConcurrent = concurrentExecutions
+                }
+                delay(20) // simulate native work
+                concurrentExecutions--
+                "Call Arun"
+            }
+            override suspend fun benchmark(threads: Int): EngineBenchmarkResult = mutex.withLock {
+                concurrentExecutions++
+                if (concurrentExecutions > maxConcurrent) {
+                    maxConcurrent = concurrentExecutions
+                }
+                delay(20)
+                concurrentExecutions--
+                EngineBenchmarkResult("mem", "mul", "sys")
+            }
+            override fun release() {}
+        }
+
+        // Launch 5 concurrent calls
+        val jobs = (1..5).map {
+            async(Dispatchers.Default) {
+                if (it % 2 == 0) {
+                    fakeEngine.transcribe(FloatArray(16000))
+                } else {
+                    fakeEngine.benchmark(4)
+                }
+            }
+        }
+
+        jobs.forEach { it.await() }
+
+        assertEquals("At most 1 native operation should run at a time", 1, maxConcurrent)
+        assertEquals("All operations finished and counter returned to 0", 0, concurrentExecutions)
+    }
+
+    @Test
+    fun testCancellationDuringInferenceRethrowsCleanly() = runBlocking {
+        val mutex = Mutex()
+        var cancelledCleanly = false
+
+        val job = launch(Dispatchers.Default) {
+            try {
+                mutex.withLock {
+                    delay(200) // Simulating long inference
+                }
+            } catch (e: CancellationException) {
+                cancelledCleanly = true
+                throw e
+            }
+        }
+
+        delay(30)
+        job.cancel()
+        job.join()
+
+        assertTrue("CancellationException should be caught and rethrown cleanly without corrupting state", cancelledCleanly)
+        assertFalse("Mutex must be unlocked after cancelled coroutine", mutex.isLocked)
     }
 }

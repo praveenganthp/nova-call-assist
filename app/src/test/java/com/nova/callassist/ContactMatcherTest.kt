@@ -57,8 +57,83 @@ class ContactMatcherTest {
                 lookupKey = "key_5",
                 displayName = "Contact Without Number",
                 phoneNumbers = emptyList()
+            ),
+            ContactModel(
+                id = "6",
+                lookupKey = "key_6",
+                displayName = "Praveen P",
+                phoneNumbers = listOf(
+                    PhoneNumber(number = "+91 98401 23456", type = "Mobile", isPrimary = true)
+                ),
+                aliases = listOf("Pravin", "PV")
+            ),
+            ContactModel(
+                id = "7",
+                lookupKey = "key_7",
+                displayName = "Vignesh",
+                phoneNumbers = listOf(
+                    PhoneNumber(number = "+91 97901 87654", type = "Mobile", isPrimary = true)
+                ),
+                aliases = listOf("Vicky")
             )
         )
+    }
+
+    @Test
+    fun testCallArunMatchesAmbiguousForSimilarContacts() {
+        // Two contacts with similar names: "Arun Kumar" and "Arun Prakash"
+        val result = matcher.match("Arun", sampleContacts)
+        assertTrue(result is MatchResult.Ambiguous)
+        val ambiguous = result as MatchResult.Ambiguous
+        assertEquals(2, ambiguous.candidates.size)
+        assertTrue(ambiguous.candidates.any { it.displayName == "Arun Kumar" })
+        assertTrue(ambiguous.candidates.any { it.displayName == "Arun Prakash" })
+    }
+
+    @Test
+    fun testCallPraveenMatchesPraveenP() {
+        val result = matcher.match("Praveen", sampleContacts)
+        assertTrue(result is MatchResult.Single)
+        val single = result as MatchResult.Single
+        assertEquals("Praveen P", single.contact.displayName)
+    }
+
+    @Test
+    fun testCallVigneshMatchesVignesh() {
+        val result = matcher.match("Vignesh", sampleContacts)
+        assertTrue(result is MatchResult.Single)
+        val single = result as MatchResult.Single
+        assertEquals("Vignesh", single.contact.displayName)
+    }
+
+    @Test
+    fun testIndianPhoneticAndAliasMatching() {
+        // Pravin should match Praveen P via alias / phonetic rule
+        val resultAlias = matcher.match("Pravin", sampleContacts)
+        assertTrue(resultAlias is MatchResult.Single)
+        assertEquals("Praveen P", (resultAlias as MatchResult.Single).contact.displayName)
+
+        // Vicky should match Vignesh via alias
+        val resultVicky = matcher.match("Vicky", sampleContacts)
+        assertTrue(resultVicky is MatchResult.Single)
+        assertEquals("Vignesh", (resultVicky as MatchResult.Single).contact.displayName)
+    }
+
+    @Test
+    fun testGenuinelyNonexistentContact() {
+        val result = matcher.match("NonExistentPerson", sampleContacts)
+        assertTrue(result is MatchResult.NoMatch)
+    }
+
+    @Test
+    fun testPunctuationAndCapitalizationMatching() {
+        val r1 = matcher.match("  pRaVeEn  ", sampleContacts)
+        assertTrue(r1 is MatchResult.Single)
+        assertEquals("Praveen P", (r1 as MatchResult.Single).contact.displayName)
+
+        val r2 = matcher.match("VIGNESH!!!", sampleContacts)
+        assertTrue(r2 is MatchResult.Single)
+        assertEquals("Vignesh", (r2 as MatchResult.Single).contact.displayName)
     }
 
     @Test

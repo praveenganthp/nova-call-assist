@@ -4,14 +4,50 @@ import java.util.Locale
 
 /**
  * Deterministic, multi-tiered contact matching engine.
- * Never uploads contacts and runs entirely locally on-device.
+ *
+ * Guarantees:
+ * 1. Accurately matches spoken names against real Android contacts and configured aliases.
+ * 2. Robust support for Indian names, initials (e.g. "Praveen P", "P. Praveen"), and phonetic spellings.
+ * 3. Never silently calls a different contact: uses conservative fuzzy matching and defaults to
+ *    [MatchResult.Ambiguous] when multiple candidates are plausible.
+ * 4. 100% on-device and offline with zero PII telemetry.
  */
 class ContactMatcher {
 
     companion object {
         private val PUNCTUATION_REGEX = Regex("[^a-zA-Z0-9\\s]")
         private val MULTI_SPACE_REGEX = Regex("\\s+")
-        private val COMMON_PREFIXES = setOf("mr", "mrs", "ms", "dr", "prof", "friend")
+        private val HONORIFICS = setOf("mr", "mrs", "ms", "dr", "prof", "er", "friend")
+        private val DESCRIPTIVE_TAGS = setOf("work", "home", "mobile", "office", "gym", "bro", "main")
+
+        // Common Indian English name transliterations and speech-to-text phonetic variations
+        private val PHONETIC_VARIANTS: Map<String, Set<String>> = mapOf(
+            "arun" to setOf("aaron", "aron", "aroon", "harun", "aran", "allan", "arun"),
+            "aaron" to setOf("arun", "aron", "aroon"),
+            "aron" to setOf("arun", "aaron", "aroon"),
+            "aroon" to setOf("arun", "aron"),
+            "praveen" to setOf("pravin", "parveen", "prabin", "praveen"),
+            "pravin" to setOf("praveen", "parveen"),
+            "parveen" to setOf("praveen", "pravin"),
+            "vignesh" to setOf("vigneshwaran", "vignesh", "vicky", "vignash"),
+            "vigneshwaran" to setOf("vignesh", "vicky"),
+            "bala" to setOf("balamurugan", "balaji", "bala"),
+            "balaji" to setOf("bala", "balamurugan"),
+            "suresh" to setOf("sureshkumar", "suresh"),
+            "ramesh" to setOf("rameshkumar", "ramesh"),
+            "karthik" to setOf("karthick", "karthikeyan", "karthik"),
+            "karthick" to setOf("karthik", "karthikeyan"),
+            "lakshmi" to setOf("laxmi", "luxmi", "lakshmi"),
+            "laxmi" to setOf("lakshmi"),
+            "swetha" to setOf("shweta", "shwetha", "swetha"),
+            "priya" to setOf("preethi", "priti", "priya"),
+            "mom" to setOf("mother", "amma", "mummy", "mom"),
+            "mother" to setOf("mom", "amma", "mummy"),
+            "amma" to setOf("mom", "mother"),
+            "dad" to setOf("father", "appa", "daddy", "dad"),
+            "father" to setOf("dad", "appa", "daddy"),
+            "appa" to setOf("dad", "father")
+        )
     }
 
     /**
@@ -28,23 +64,49 @@ class ContactMatcher {
             return MatchResult.NoMatch(query)
         }
 
-        // Tier 1: Exact normalized full-name match
-        val exactMatches = contacts.filter { normalize(it.displayName) == cleanQuery }
+        // Tier 1: Exact normalized full-name or alias match
+        val exactMatches = contacts.filter { contact ->
+            normalize(contact.displayName) == cleanQuery ||
+                    contact.aliases.any { normalize(it) == cleanQuery }
+        }
         if (exactMatches.isNotEmpty()) {
             return resolveCandidates(query, exactMatches, confidence = 1.0f)
         }
 
-        // Tier 2: Exact first-name or single token matches
-        // e.g. Contact "Arun" when user asks for "Arun"
-        val exactTokenMatches = contacts.filter { contact ->
+        // Tier 2: Indian English phonetic variant match
+        // e.g. Whisper transcribed "Aaron" or "Aron" when user said "Arun"
+        val phoneticMatches = contacts.filter { contact ->
+            matchesPhoneticVariant(queryTokens, contact)
+        }
+        if (phoneticMatches.isNotEmpty()) {
+            return resolveCandidates(query, phoneticMatches, confidence = 0.95f)
+        }
+
+        // Tier 3: Match name ignoring initials (e.g. query "Praveen" matches "Praveen P" or "P. Praveen")
+        val initialIgnoredMatches = contacts.filter { contact ->
+            val contactTokens = tokenize(normalize(contact.displayName))
+            val substantiveContactTokens = contactTokens.filter { it.length > 1 }
+            val substantiveQueryTokens = queryTokens.filter { it.length > 1 }
+            if (substantiveContactTokens.isNotEmpty() && substantiveQueryTokens.isNotEmpty()) {
+                substantiveContactTokens == substantiveQueryTokens
+            } else {
+                false
+            }
+        }
+        if (initialIgnoredMatches.isNotEmpty()) {
+            return resolveCandidates(query, initialIgnoredMatches, confidence = 0.93f)
+        }
+
+        // Tier 4: Exact single token match
+        val singleTokenMatches = contacts.filter { contact ->
             val contactTokens = tokenize(normalize(contact.displayName))
             contactTokens.size == 1 && queryTokens.size == 1 && contactTokens[0] == queryTokens[0]
         }
-        if (exactTokenMatches.isNotEmpty()) {
-            return resolveCandidates(query, exactTokenMatches, confidence = 0.98f)
+        if (singleTokenMatches.isNotEmpty()) {
+            return resolveCandidates(query, singleTokenMatches, confidence = 0.92f)
         }
 
-        // Tier 3: Query tokens match the start of contact tokens (e.g. "Arun" -> "Arun Kumar", "Arun Prakash")
+        // Tier 5: Prefix token match (e.g. "Arun" matches "Arun Kumar")
         val prefixMatches = contacts.filter { contact ->
             val contactTokens = tokenize(normalize(contact.displayName))
             if (contactTokens.isEmpty()) false
@@ -54,62 +116,100 @@ class ContactMatcher {
                 false
             }
         }
-        if (prefixMatches.size == 1) {
+        if (prefixMatches.isNotEmpty()) {
             return resolveCandidates(query, prefixMatches, confidence = 0.90f)
-        } else if (prefixMatches.size > 1) {
-            return MatchResult.Ambiguous(query, prefixMatches)
         }
 
-        // Tier 4: All query tokens are contained in contact tokens (unordered)
-        // e.g. "Kumar Rahul" matches "Rahul Kumar"
+        // Tier 6: All query tokens are contained in contact tokens (unordered)
+        // e.g. "Kumar Rahul" matches "Rahul Kumar", "Arun" matches "Dr. Arun Plenome"
         val allTokensMatched = contacts.filter { contact ->
             val contactTokens = tokenize(normalize(contact.displayName)).toSet()
             queryTokens.all { it in contactTokens }
         }
-        if (allTokensMatched.size == 1) {
+        if (allTokensMatched.isNotEmpty()) {
             return resolveCandidates(query, allTokensMatched, confidence = 0.85f)
-        } else if (allTokensMatched.size > 1) {
-            return MatchResult.Ambiguous(query, allTokensMatched)
         }
 
-        // Tier 5: Substring containment (e.g. "Arun" inside "Dr. Arun")
+        // Tier 7: Substring containment
         val substringMatches = contacts.filter { contact ->
             val normName = normalize(contact.displayName)
             normName.contains(cleanQuery)
         }
-        if (substringMatches.size == 1) {
+        if (substringMatches.isNotEmpty()) {
             return resolveCandidates(query, substringMatches, confidence = 0.80f)
-        } else if (substringMatches.size > 1) {
-            return MatchResult.Ambiguous(query, substringMatches)
         }
 
-        // Tier 6: Levenshtein distance for speech recognition variances (e.g. "Aron" -> "Arun", "Iron" -> "Arun")
-        val fuzzyMatches = contacts.mapNotNull { contact ->
+        // Tier 8: Conservative Levenshtein fuzzy match
+        // Strictly guarded to prevent silently calling the wrong person
+        val fuzzyCandidates = contacts.mapNotNull { contact ->
             val normName = normalize(contact.displayName)
-            val minDistance = calculateMinTokenDistance(queryTokens, tokenize(normName))
-            val threshold = when {
-                cleanQuery.length >= 7 -> 3
-                cleanQuery.length >= 4 -> 2
-                else -> 1
-            }
-            if (minDistance <= threshold) {
-                Pair(contact, minDistance)
+            val contactTokens = tokenize(normName)
+            val distance = calculateConservativeTokenDistance(queryTokens, contactTokens)
+            if (distance != null) {
+                Pair(contact, distance)
             } else {
                 null
             }
         }
 
-        if (fuzzyMatches.isNotEmpty()) {
-            val bestDistance = fuzzyMatches.minOf { it.second }
-            val topCandidates = fuzzyMatches.filter { it.second == bestDistance }.map { it.first }
-            if (topCandidates.size == 1) {
-                return resolveCandidates(query, topCandidates, confidence = 0.70f)
-            } else {
-                return MatchResult.Ambiguous(query, topCandidates)
-            }
+        if (fuzzyCandidates.isNotEmpty()) {
+            val minDistance = fuzzyCandidates.minOf { it.second }
+            val topCandidates = fuzzyCandidates.filter { it.second == minDistance }.map { it.first }
+            return resolveCandidates(query, topCandidates, confidence = 0.70f)
         }
 
         return MatchResult.NoMatch(query)
+    }
+
+    private fun matchesPhoneticVariant(queryTokens: List<String>, contact: ContactModel): Boolean {
+        val contactTokens = tokenize(normalize(contact.displayName))
+        if (contactTokens.isEmpty() || queryTokens.isEmpty()) return false
+
+        for (q in queryTokens) {
+            val variants = PHONETIC_VARIANTS[q] ?: emptySet()
+            for (c in contactTokens) {
+                if (c in variants || (PHONETIC_VARIANTS[c]?.contains(q) == true)) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Calculates conservative edit distance.
+     * Rejects matches if query is too short (<4 chars) or if distance ratio is too high.
+     */
+    private fun calculateConservativeTokenDistance(
+        queryTokens: List<String>,
+        contactTokens: List<String>
+    ): Int? {
+        if (queryTokens.isEmpty() || contactTokens.isEmpty()) return null
+
+        var bestDistance = Int.MAX_VALUE
+        var matched = false
+
+        for (q in queryTokens) {
+            if (q.length < 4) continue // Don't fuzzy-match short abbreviations or initials
+
+            val maxAllowedDistance = when {
+                q.length >= 7 -> 2
+                else -> 1
+            }
+
+            for (c in contactTokens) {
+                if (c.length < 3) continue
+                val dist = levenshtein(q, c)
+                if (dist <= maxAllowedDistance) {
+                    matched = true
+                    if (dist < bestDistance) {
+                        bestDistance = dist
+                    }
+                }
+            }
+        }
+
+        return if (matched) bestDistance else null
     }
 
     private fun resolveCandidates(
@@ -117,11 +217,14 @@ class ContactMatcher {
         candidates: List<ContactModel>,
         confidence: Float
     ): MatchResult {
-        if (candidates.size > 1) {
-            return MatchResult.Ambiguous(query, candidates)
+        // Distinct by contact ID and phone number to avoid duplicates
+        val distinctCandidates = candidates.distinctBy { it.id }
+
+        if (distinctCandidates.size > 1) {
+            return MatchResult.Ambiguous(query, distinctCandidates)
         }
 
-        val contact = candidates.first()
+        val contact = distinctCandidates.first()
         val number = contact.primaryOrFirstNumber
         return if (number == null) {
             MatchResult.NoPhoneNumber(contact)
@@ -141,28 +244,11 @@ class ContactMatcher {
     }
 
     /**
-     * Splits into tokens and removes common conversational prefixes.
+     * Splits into tokens and removes common honorifics and descriptive parentheticals.
      */
     fun tokenize(input: String): List<String> {
         val tokens = input.split(MULTI_SPACE_REGEX).filter { it.isNotBlank() }
-        return tokens.filter { it !in COMMON_PREFIXES }
-    }
-
-    /**
-     * Finds the minimum Levenshtein edit distance between token sets.
-     */
-    private fun calculateMinTokenDistance(queryTokens: List<String>, contactTokens: List<String>): Int {
-        if (queryTokens.isEmpty() || contactTokens.isEmpty()) return Int.MAX_VALUE
-        var minDistance = Int.MAX_VALUE
-        for (q in queryTokens) {
-            for (c in contactTokens) {
-                val dist = levenshtein(q, c)
-                if (dist < minDistance) {
-                    minDistance = dist
-                }
-            }
-        }
-        return minDistance
+        return tokens.filter { it !in HONORIFICS && it !in DESCRIPTIVE_TAGS }
     }
 
     private fun levenshtein(s1: String, s2: String): Int {

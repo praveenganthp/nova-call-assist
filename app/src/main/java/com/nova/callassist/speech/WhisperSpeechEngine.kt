@@ -1,8 +1,10 @@
 package com.nova.callassist.speech
 
+import android.os.SystemClock
 import android.util.Log
 import com.whispercpp.whisper.WhisperContext
 import com.whispercpp.whisper.WhisperCpuConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -12,6 +14,7 @@ import java.io.File
 /**
  * SpeechRecognitionEngine implementation powered by whisper.cpp.
  * Performs fast, 100% on-device offline inference using quantized or fp16 Whisper models.
+ * Strictly synchronized via [inferenceMutex] to prevent native concurrency crashes or invalid contexts.
  */
 class WhisperSpeechEngine : SpeechRecognitionEngine {
 
@@ -36,18 +39,31 @@ class WhisperSpeechEngine : SpeechRecognitionEngine {
             return@withContext false
         }
 
-        try {
-            release()
-            Log.i(TAG, "Loading Whisper model from $modelPath (${file.length() / 1048576} MB)...")
-            whisperContext = WhisperContext.createContextFromFile(modelPath)
-            currentModelPath = modelPath
-            Log.i(TAG, "Whisper model loaded successfully.")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load Whisper context: ${e.message}", e)
-            whisperContext = null
-            currentModelPath = null
-            false
+        val queueStart = SystemClock.elapsedRealtime()
+        inferenceMutex.withLock {
+            val queueWaitMs = SystemClock.elapsedRealtime() - queueStart
+            Log.d(TAG, "[MODEL_INIT] Acquired mutex in ${queueWaitMs}ms. Initializing model from $modelPath (${file.length() / 1048576} MB)...")
+
+            try {
+                // Safely release previous context under lock
+                val oldCtx = whisperContext
+                whisperContext = null
+                currentModelPath = null
+                oldCtx?.release()
+
+                whisperContext = WhisperContext.createContextFromFile(modelPath)
+                currentModelPath = modelPath
+                Log.i(TAG, "[MODEL_INIT] Whisper model loaded successfully from $modelPath")
+                true
+            } catch (e: CancellationException) {
+                Log.d(TAG, "[MODEL_INIT] Initialization cancelled.")
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "[MODEL_INIT] Failed to load Whisper context: ${e.message}", e)
+                whisperContext = null
+                currentModelPath = null
+                false
+            }
         }
     }
 
@@ -57,22 +73,41 @@ class WhisperSpeechEngine : SpeechRecognitionEngine {
         printTimestamps: Boolean,
         prompt: String?
     ): String = withContext(Dispatchers.Default) {
+        val queueStart = SystemClock.elapsedRealtime()
         inferenceMutex.withLock {
+            val queueWaitMs = SystemClock.elapsedRealtime() - queueStart
             val ctx = whisperContext ?: throw IllegalStateException("WhisperSpeechEngine is not initialized.")
             val numThreads = threads ?: WhisperCpuConfig.preferredThreadCount
-            val rawText = ctx.transcribeData(
-                audioData,
-                printTimestamp = printTimestamps,
-                threads = numThreads,
-                prompt = prompt
-            )
-            cleanWhisperTranscript(rawText)
+
+            Log.d(TAG, "[INFERENCE] Start: samples=${audioData.size} (${audioData.size / 16000f}s), threads=$numThreads, queueWait=${queueWaitMs}ms")
+            val inferenceStart = SystemClock.elapsedRealtime()
+
+            val rawText = try {
+                ctx.transcribeData(
+                    audioData,
+                    printTimestamp = printTimestamps,
+                    threads = numThreads,
+                    prompt = prompt
+                )
+            } catch (e: CancellationException) {
+                Log.d(TAG, "[INFERENCE] Cancelled during native transcription.")
+                throw e
+            }
+
+            val inferenceDuration = SystemClock.elapsedRealtime() - inferenceStart
+            val cleanText = cleanWhisperTranscript(rawText)
+            Log.i(TAG, "[INFERENCE] Done: text=\"$cleanText\" in ${inferenceDuration}ms (queueWait: ${queueWaitMs}ms)")
+            cleanText
         }
     }
 
     override suspend fun benchmark(threads: Int): EngineBenchmarkResult = withContext(Dispatchers.Default) {
+        val queueStart = SystemClock.elapsedRealtime()
         inferenceMutex.withLock {
+            val queueWaitMs = SystemClock.elapsedRealtime() - queueStart
             val ctx = whisperContext ?: throw IllegalStateException("Whisper context not initialized.")
+            Log.d(TAG, "[BENCHMARK] Start: threads=$threads, queueWait=${queueWaitMs}ms")
+
             val memBench = ctx.benchMemory(threads)
             val mulMatBench = ctx.benchGgmlMulMat(threads)
             val sysInfo = WhisperContext.getSystemInfo()
@@ -86,13 +121,12 @@ class WhisperSpeechEngine : SpeechRecognitionEngine {
 
     override fun release() {
         try {
-            val ctx = whisperContext
-            whisperContext = null
-            currentModelPath = null
-            ctx?.let {
-                // Non-blocking release
-                kotlinx.coroutines.runBlocking(Dispatchers.IO) {
-                    it.release()
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                inferenceMutex.withLock {
+                    val ctx = whisperContext
+                    whisperContext = null
+                    currentModelPath = null
+                    ctx?.release()
                 }
             }
         } catch (e: Exception) {

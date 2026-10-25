@@ -29,6 +29,7 @@ class SettingsRepository(private val context: Context) {
         val KEY_CONFIRMATION_REQUIRED = booleanPreferencesKey("confirmation_required")
         val KEY_MODEL_LANGUAGE = stringPreferencesKey("model_language")
         val KEY_CPU_THREADS = intPreferencesKey("cpu_threads")
+        val KEY_SELECTED_MODEL_ID = stringPreferencesKey("selected_model_id")
     }
 
     private val dataStore = context.dataStore
@@ -81,6 +82,14 @@ class SettingsRepository(private val context: Context) {
             preferences[KEY_MODEL_LANGUAGE] ?: "en-us"
         }
 
+    val selectedModelId: Flow<String> = dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { preferences ->
+            preferences[KEY_SELECTED_MODEL_ID] ?: "tiny_en"
+        }
+
     suspend fun setWakeWordEnabled(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[KEY_WAKE_WORD_ENABLED] = enabled
@@ -114,6 +123,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setCpuThreads(threads: Int) {
         dataStore.edit { preferences ->
             preferences[KEY_CPU_THREADS] = threads.coerceIn(1, 8)
+        }
+    }
+
+    suspend fun setSelectedModelId(modelId: String) {
+        dataStore.edit { preferences ->
+            preferences[KEY_SELECTED_MODEL_ID] = modelId
         }
     }
 }

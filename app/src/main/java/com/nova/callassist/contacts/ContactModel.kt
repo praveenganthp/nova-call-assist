@@ -36,7 +36,8 @@ data class ContactModel(
     val lookupKey: String,
     val displayName: String,
     val phoneNumbers: List<PhoneNumber>,
-    val photoUri: String? = null
+    val photoUri: String? = null,
+    val aliases: List<String> = emptyList()
 ) {
     val primaryOrFirstNumber: PhoneNumber?
         get() = phoneNumbers.firstOrNull { it.isPrimary } ?: phoneNumbers.firstOrNull()

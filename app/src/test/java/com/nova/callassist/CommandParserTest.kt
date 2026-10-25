@@ -39,6 +39,89 @@ class CommandParserTest {
     }
 
     @Test
+    fun testConversationalAndTargetNameExtraction() {
+        // "Call Arun", "Call Praveen", "Call Vignesh"
+        val c1 = parser.parse("Call Arun")
+        assertTrue(c1 is CommandParser.Command.Call)
+        assertEquals("arun", (c1 as CommandParser.Command.Call).targetName)
+
+        val c2 = parser.parse("Call Praveen")
+        assertTrue(c2 is CommandParser.Command.Call)
+        assertEquals("praveen", (c2 as CommandParser.Command.Call).targetName)
+
+        val c3 = parser.parse("Call Vignesh")
+        assertTrue(c3 is CommandParser.Command.Call)
+        assertEquals("vignesh", (c3 as CommandParser.Command.Call).targetName)
+
+        // Conversational variations
+        val c4 = parser.parse("Please call Arun")
+        assertTrue(c4 is CommandParser.Command.Call)
+        assertEquals("arun", (c4 as CommandParser.Command.Call).targetName)
+
+        val c5 = parser.parse("Can you call Praveen?")
+        assertTrue(c5 is CommandParser.Command.Call)
+        assertEquals("praveen", (c5 as CommandParser.Command.Call).targetName)
+
+        val c6 = parser.parse("Could you please call Vignesh?")
+        assertTrue(c6 is CommandParser.Command.Call)
+        assertEquals("vignesh", (c6 as CommandParser.Command.Call).targetName)
+
+        val c7 = parser.parse("Call Arun please.")
+        assertTrue(c7 is CommandParser.Command.Call)
+        assertEquals("arun", (c7 as CommandParser.Command.Call).targetName)
+
+        val c8 = parser.parse("Hey Nova, call Praveen")
+        assertTrue(c8 is CommandParser.Command.Call)
+        assertEquals("praveen", (c8 as CommandParser.Command.Call).targetName)
+    }
+
+    @Test
+    fun testPunctuationAndCapitalizationDifferences() {
+        val c1 = parser.parse("CALL ARUN!!!")
+        assertTrue(c1 is CommandParser.Command.Call)
+        assertEquals("arun", (c1 as CommandParser.Command.Call).targetName)
+
+        val c2 = parser.parse("call praveen...")
+        assertTrue(c2 is CommandParser.Command.Call)
+        assertEquals("praveen", (c2 as CommandParser.Command.Call).targetName)
+
+        val c3 = parser.parse("   cAlL   ViGnEsH?   ")
+        assertTrue(c3 is CommandParser.Command.Call)
+        assertEquals("vignesh", (c3 as CommandParser.Command.Call).targetName)
+    }
+
+    @Test
+    fun testTranscriptContainingOnlyContactName() {
+        val c1 = parser.parse("Arun")
+        assertTrue(c1 is CommandParser.Command.Call)
+        assertEquals("arun", (c1 as CommandParser.Command.Call).targetName)
+
+        val c2 = parser.parse("Praveen")
+        assertTrue(c2 is CommandParser.Command.Call)
+        assertEquals("praveen", (c2 as CommandParser.Command.Call).targetName)
+
+        val c3 = parser.parse("Vignesh")
+        assertTrue(c3 is CommandParser.Command.Call)
+        assertEquals("vignesh", (c3 as CommandParser.Command.Call).targetName)
+    }
+
+    @Test
+    fun testWrongOrIncompleteTranscript() {
+        // Incomplete command words without a name
+        assertTrue(parser.parse("call") is CommandParser.Command.Unknown)
+        assertTrue(parser.parse("please call") is CommandParser.Command.Unknown)
+        assertTrue(parser.parse("call to") is CommandParser.Command.Unknown)
+
+        // Wake words alone without a command
+        assertTrue(parser.parse("hey nova") is CommandParser.Command.Unknown)
+        assertTrue(parser.parse("nova") is CommandParser.Command.Unknown)
+
+        // Irrelevant phrases
+        assertTrue(parser.parse("what is the weather") is CommandParser.Command.Unknown)
+        assertTrue(parser.parse("open camera") is CommandParser.Command.Unknown)
+    }
+
+    @Test
     fun testConfirmationCommands() {
         assertTrue(parser.parse("yes") is CommandParser.Command.Confirm)
         assertTrue(parser.parse("confirm") is CommandParser.Command.Confirm)

@@ -151,6 +151,11 @@ class WhisperSpeechRecognizerManager(
                         listener?.onTimeout()
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                isSessionActive.set(false)
+                watchdogJob?.cancel()
+                Log.d(TAG, "Command transcription cancelled normally.")
+                throw e
             } catch (e: Exception) {
                 isSessionActive.set(false)
                 watchdogJob?.cancel()
