@@ -47,7 +47,7 @@ class SettingsRepository(private val context: Context) {
             if (exception is IOException) emit(emptyPreferences()) else throw exception
         }
         .map { preferences ->
-            preferences[KEY_WAKE_WORD_ENABLED] ?: false
+            preferences[KEY_WAKE_WORD_ENABLED] ?: true
         }
 
     val directCallingEnabled: Flow<Boolean> = dataStore.data

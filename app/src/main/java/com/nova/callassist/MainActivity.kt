@@ -43,6 +43,25 @@ class MainActivity : ComponentActivity() {
                 app.assistantController.onPermissionGranted(perm)
             }
         }
+
+        checkAndStartAssistantIfPermissionsGranted()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkAndStartAssistantIfPermissionsGranted()
+    }
+
+    fun checkAndStartAssistantIfPermissionsGranted() {
+        val missing = app.assistantController.checkMissingPermissions()
+        if (missing.isEmpty()) {
+            try {
+                AssistantService.startService(this)
+            } catch (e: Exception) {
+                // Ignore background start exceptions
+            }
+            app.assistantController.startAssistant()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

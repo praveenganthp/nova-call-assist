@@ -187,12 +187,23 @@ class AssistantController(
                 updateDiagnostics()
                 audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CONFIRMATION_ACK)
                 audioFeedbackManager.speak("${option.displayName} is ready.")
+                startAssistant()
             } else {
                 audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.CANCEL_NACK)
                 _state.value = AssistantState.Error(
                     "Model download failed: ${result.exceptionOrNull()?.message ?: "Network error"}"
                 )
             }
+        }
+    }
+
+    /**
+     * Stops wake-word spotting while keeping manual listening available.
+     */
+    fun stopWakeWord() {
+        wakeWordDetector?.stopSpotting()
+        if (_state.value is AssistantState.ListeningForWakeWord) {
+            _state.value = AssistantState.Idle
         }
     }
 
@@ -279,21 +290,29 @@ class AssistantController(
             engine = modelManager.speechEngine,
             audioCaptureCoordinator = audioCaptureCoordinator,
             isTtsSpeakingProvider = { audioFeedbackManager.isSpeaking() }
-        ) {
+        ) { transcript ->
             scope.launch {
-                onWakeWordDetected()
+                onWakeWordDetected(transcript)
             }
         }
         _state.value = AssistantState.ListeningForWakeWord
         wakeWordDetector?.startSpotting()
     }
 
-    private fun onWakeWordDetected() {
+    private fun onWakeWordDetected(transcript: String? = null) {
         wakeWordTriggerCount++
         lastWakeTimestamp = System.currentTimeMillis()
         updateDiagnostics()
         audioFeedbackManager.playChime(AudioFeedbackManager.ToneType.WAKE_WORD_DETECTED)
-        startCommandListening(prompt = null)
+
+        val parsed = transcript?.let { commandParser.parse(it) }
+        if (parsed is CommandParser.Command.Call) {
+            _state.value = AssistantState.ProcessingCommand(transcript)
+            handleCommandTranscript(transcript)
+        } else {
+            // User said "Hey Nova" -> greet and ask who to call!
+            startCommandListening(prompt = "Hey! Who would you like to call?")
+        }
     }
 
     private fun startCommandListening(prompt: String? = null) {

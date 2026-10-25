@@ -137,7 +137,16 @@ fun SettingsScreen(
                     title = "Wake-Word Detection (\"Hey Nova\")",
                     description = "Listens locally for \"Hey Nova\" using low-power voice activity energy gating. Does not transmit audio to any server.",
                     checked = wakeWordEnabled,
-                    onCheckedChange = { coroutineScope.launch { settingsRepository.setWakeWordEnabled(it) } }
+                    onCheckedChange = { enabled ->
+                        coroutineScope.launch {
+                            settingsRepository.setWakeWordEnabled(enabled)
+                            if (enabled) {
+                                controller.startAssistant()
+                            } else {
+                                controller.stopWakeWord()
+                            }
+                        }
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))

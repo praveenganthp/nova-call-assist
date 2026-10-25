@@ -194,20 +194,20 @@ class WhisperMigrationTest {
     @Test
     fun testAdaptiveNoiseFloorAndDynamicThreshold() {
         // Quiet room
-        val quietFloor = 40.0
+        val quietFloor = 20.0
         val quietThreshold = AudioMath.computeDynamicThreshold(quietFloor)
         assertEquals(AudioMath.MIN_DYNAMIC_THRESHOLD, quietThreshold, 0.001)
 
         val quietContinuation = AudioMath.computeContinuationThreshold(quietThreshold)
-        assertEquals(210.0, quietContinuation, 0.001)
+        assertEquals(AudioMath.MIN_DYNAMIC_THRESHOLD * 0.70, quietContinuation, 0.001)
 
         // Noisy room with fan noise (RMS = 500)
         val noisyFloor = 500.0
         val noisyThreshold = AudioMath.computeDynamicThreshold(noisyFloor)
-        assertEquals(1250.0, noisyThreshold, 0.001)
+        assertEquals(940.0, noisyThreshold, 0.001)
 
         val noisyContinuation = AudioMath.computeContinuationThreshold(noisyThreshold)
-        assertEquals(875.0, noisyContinuation, 0.001)
+        assertEquals(940.0 * 0.70, noisyContinuation, 0.001)
 
         // Noise floor adaptation
         var floor = 100.0
@@ -315,8 +315,8 @@ class WhisperMigrationTest {
             }
         }
 
-        assertTrue("Speech followed by 1000ms trailing silence MUST finish recording", recordingFinished)
-        assertEquals("Should complete at exactly 1000ms after last speech frame", 2100L, finishTime)
+        assertTrue("Speech followed by 900ms trailing silence MUST finish recording", recordingFinished)
+        assertEquals("Should complete at exactly 900ms after last speech frame", 2000L, finishTime)
     }
 
     @Test

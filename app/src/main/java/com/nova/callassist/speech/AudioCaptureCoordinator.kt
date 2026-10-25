@@ -29,14 +29,14 @@ import kotlin.math.sqrt
 object AudioMath {
     const val SAMPLE_RATE = 16000
     const val PRE_ROLL_SAMPLES = 6400 // 400 ms at 16 kHz
-    const val MIN_SPEECH_DURATION_MS = 350L
-    const val TRAILING_SILENCE_WINDOW_MS = 1000L
-    const val INITIAL_SILENCE_TIMEOUT_MS = 5000L
+    const val MIN_SPEECH_DURATION_MS = 250L
+    const val TRAILING_SILENCE_WINDOW_MS = 900L
+    const val INITIAL_SILENCE_TIMEOUT_MS = 6000L
     const val HARD_MAX_RECORDING_MS = 12000L
     const val WATCHDOG_TIMEOUT_MS = 15000L
 
-    const val MIN_DYNAMIC_THRESHOLD = 300.0
-    const val MAX_DYNAMIC_THRESHOLD = 1800.0
+    const val MIN_DYNAMIC_THRESHOLD = 80.0
+    const val MAX_DYNAMIC_THRESHOLD = 1200.0
 
     /**
      * Converts 16-bit PCM short array to 32-bit normalized float array ([-1.0, 1.0]).
@@ -79,7 +79,7 @@ object AudioMath {
      * Computes dynamic voice energy threshold based on ambient noise floor.
      */
     fun computeDynamicThreshold(noiseFloor: Double): Double {
-        return (noiseFloor * 2.2 + 150.0).coerceIn(MIN_DYNAMIC_THRESHOLD, MAX_DYNAMIC_THRESHOLD)
+        return (noiseFloor * 1.8 + 40.0).coerceIn(MIN_DYNAMIC_THRESHOLD, MAX_DYNAMIC_THRESHOLD)
     }
 
     /**
@@ -279,35 +279,42 @@ class AudioCaptureCoordinator(
         ).coerceAtLeast(AudioMath.SAMPLE_RATE * 2)
 
         var record: AudioRecord? = null
-        try {
-            record = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                AudioMath.SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minBufferSize
-            )
+        val audioSources = listOf(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC
+        )
 
-            if (record.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord failed to initialize. State: ${record.state}")
-                record.release()
-                val cb = commandCallbacks
-                stopInternal()
-                cb?.onError("Microphone is currently in use or unavailable.")
-                return
+        for (source in audioSources) {
+            try {
+                val candidate = AudioRecord(
+                    source,
+                    AudioMath.SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBufferSize
+                )
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    candidate.startRecording()
+                    record = candidate
+                    Log.i(TAG, "Exclusive AudioRecord session started successfully with source: $source")
+                    break
+                } else {
+                    candidate.release()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not start AudioRecord with source $source: ${e.message}")
             }
+        }
 
-            record.startRecording()
-            activeAudioRecord = record
-            Log.i(TAG, "Exclusive AudioRecord session started successfully.")
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception starting AudioRecord: ${e.message}", e)
-            try { record?.release() } catch (ignored: Exception) {}
+        if (record == null) {
+            Log.e(TAG, "AudioRecord failed to initialize on all audio sources.")
             val cb = commandCallbacks
             stopInternal()
-            cb?.onError("Microphone initialization error: ${e.localizedMessage ?: "Unknown"}")
+            cb?.onError("Microphone is currently in use or unavailable.")
             return
         }
+
+        activeAudioRecord = record
 
         captureJob = scope.launch(Dispatchers.Default) {
             val audioRecord = activeAudioRecord ?: return@launch
@@ -348,31 +355,26 @@ class AudioCaptureCoordinator(
                             }
 
                             Mode.COMMAND -> {
+                                // Accumulate all audio samples from the moment command mode begins
+                                for (i in 0 until readSize) {
+                                    commandSamples.add(chunkBuffer[i])
+                                }
+
                                 if (rms > dynamicThreshold) {
                                     if (!speechOnset) {
                                         speechOnset = true
                                         speechStartTime = now
                                         commandCallbacks?.onSpeechOnset?.invoke()
-
-                                        // Prepend pre-roll buffer to command samples
-                                        val preRoll = preRollBuffer.getSamples()
-                                        for (s in preRoll) {
-                                            commandSamples.add(s)
-                                        }
-                                        Log.d(TAG, "Speech onset detected! Prepended ${preRoll.size} pre-roll samples.")
+                                        Log.d(TAG, "Speech onset detected! RMS: $rms > $dynamicThreshold")
                                     }
                                     lastVoiceTime = now
                                 }
 
                                 if (speechOnset) {
-                                    for (i in 0 until readSize) {
-                                        commandSamples.add(chunkBuffer[i])
-                                    }
-
                                     val silenceDuration = now - lastVoiceTime
                                     val speechDuration = lastVoiceTime - speechStartTime
 
-                                    // Trailing silence detection
+                                    // Trailing silence detection (900ms silence after speech)
                                     if (speechDuration >= AudioMath.MIN_SPEECH_DURATION_MS &&
                                         silenceDuration >= AudioMath.TRAILING_SILENCE_WINDOW_MS
                                     ) {
@@ -381,19 +383,24 @@ class AudioCaptureCoordinator(
                                         break
                                     }
 
-                                    // Hard maximum recording limit
+                                    // Hard maximum recording limit (12s)
                                     if ((now - speechStartTime) >= AudioMath.HARD_MAX_RECORDING_MS) {
                                         Log.i(TAG, "Hard maximum command duration reached. Finishing command capture.")
                                         finishCommandCapture(commandSamples)
                                         break
                                     }
                                 } else {
-                                    // Initial silence timeout (no speech spoken)
+                                    // Initial silence timeout (no speech detected above threshold)
                                     if ((now - commandCaptureStartTime) >= AudioMath.INITIAL_SILENCE_TIMEOUT_MS) {
-                                        Log.i(TAG, "Initial silence timeout. No speech detected within ${AudioMath.INITIAL_SILENCE_TIMEOUT_MS}ms.")
-                                        val cb = commandCallbacks
-                                        stopInternal()
-                                        cb?.onTimeout?.invoke()
+                                        Log.i(TAG, "Initial silence timeout. Checking captured audio buffer.")
+                                        // If user spoke softly, we still captured the audio! Attempt Whisper transcription
+                                        if (commandSamples.size >= AudioMath.SAMPLE_RATE) {
+                                            finishCommandCapture(commandSamples)
+                                        } else {
+                                            val cb = commandCallbacks
+                                            stopInternal()
+                                            cb?.onTimeout?.invoke()
+                                        }
                                         break
                                     }
                                 }

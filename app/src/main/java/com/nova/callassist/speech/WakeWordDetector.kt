@@ -25,7 +25,7 @@ class WakeWordDetector(
     private val engine: SpeechRecognitionEngine,
     private val audioCaptureCoordinator: AudioCaptureCoordinator,
     private val isTtsSpeakingProvider: () -> Boolean = { false },
-    private val onWakeWordDetected: () -> Unit
+    private val onWakeWordDetected: (String) -> Unit
 ) {
 
     companion object {
@@ -109,7 +109,7 @@ class WakeWordDetector(
             return
         }
 
-        val dynamicThreshold = (noiseFloor * 2.0 + 100.0).coerceIn(350.0, 1600.0)
+        val dynamicThreshold = (noiseFloor * 1.8 + 40.0).coerceIn(80.0, 1000.0)
         val continuationThreshold = dynamicThreshold * 0.70
         val now = SystemClock.elapsedRealtime()
 
@@ -175,7 +175,7 @@ class WakeWordDetector(
                     Log.i(TAG, "Wake word triggered: \"$transcript\"!")
                     mainHandler.post {
                         stopSpotting()
-                        onWakeWordDetected()
+                        onWakeWordDetected(transcript)
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
