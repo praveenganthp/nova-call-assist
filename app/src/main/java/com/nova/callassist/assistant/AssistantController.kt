@@ -175,6 +175,18 @@ class AssistantController(
     }
 
     /**
+     * Toggles manual listening: if already listening, finishes capture and transcribes immediately;
+     * otherwise starts listening.
+     */
+    fun toggleListeningManually() {
+        if (_state.value is AssistantState.ListeningForCommand) {
+            audioCaptureCoordinator.finishCommandCaptureNow()
+        } else {
+            startListeningManually()
+        }
+    }
+
+    /**
      * Downloads and initializes the offline speech model for non-technical users.
      */
     fun triggerModelDownload(option: WhisperModelOption = WhisperModelOption.DEFAULT) {

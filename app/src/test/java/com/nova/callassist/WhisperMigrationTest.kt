@@ -204,10 +204,10 @@ class WhisperMigrationTest {
         // Noisy room with fan noise (RMS = 500)
         val noisyFloor = 500.0
         val noisyThreshold = AudioMath.computeDynamicThreshold(noisyFloor)
-        assertEquals(940.0, noisyThreshold, 0.001)
+        assertEquals(775.0, noisyThreshold, 0.001)
 
         val noisyContinuation = AudioMath.computeContinuationThreshold(noisyThreshold)
-        assertEquals(940.0 * 0.70, noisyContinuation, 0.001)
+        assertEquals(775.0 * 0.70, noisyContinuation, 0.001)
 
         // Noise floor adaptation
         var floor = 100.0

@@ -35,8 +35,8 @@ object AudioMath {
     const val HARD_MAX_RECORDING_MS = 12000L
     const val WATCHDOG_TIMEOUT_MS = 15000L
 
-    const val MIN_DYNAMIC_THRESHOLD = 80.0
-    const val MAX_DYNAMIC_THRESHOLD = 1200.0
+    const val MIN_DYNAMIC_THRESHOLD = 60.0
+    const val MAX_DYNAMIC_THRESHOLD = 1000.0
 
     /**
      * Converts 16-bit PCM short array to 32-bit normalized float array ([-1.0, 1.0]).
@@ -79,7 +79,7 @@ object AudioMath {
      * Computes dynamic voice energy threshold based on ambient noise floor.
      */
     fun computeDynamicThreshold(noiseFloor: Double): Double {
-        return (noiseFloor * 1.8 + 40.0).coerceIn(MIN_DYNAMIC_THRESHOLD, MAX_DYNAMIC_THRESHOLD)
+        return (noiseFloor * 1.5 + 25.0).coerceIn(MIN_DYNAMIC_THRESHOLD, MAX_DYNAMIC_THRESHOLD)
     }
 
     /**
@@ -165,6 +165,13 @@ class AudioCaptureCoordinator(
 
     private val preRollBuffer = PreRollBuffer()
 
+    // Command capture session state
+    private var commandCaptureStartTime = 0L
+    private var commandSpeechOnset = false
+    private var commandSpeechStartTime = 0L
+    private var commandLastVoiceTime = 0L
+    private val commandSamples = ArrayList<Short>(AudioMath.SAMPLE_RATE * 8)
+
     private val _telemetry = MutableStateFlow(CaptureTelemetry())
     val telemetry: StateFlow<CaptureTelemetry> = _telemetry.asStateFlow()
 
@@ -209,6 +216,20 @@ class AudioCaptureCoordinator(
             captureMutex.withLock {
                 commandCallbacks = callbacks
                 wakeWordFrameConsumer = null
+
+                // Reset command capture session state completely!
+                commandCaptureStartTime = SystemClock.elapsedRealtime()
+                commandSpeechOnset = false
+                commandSpeechStartTime = 0L
+                commandLastVoiceTime = 0L
+                synchronized(commandSamples) {
+                    commandSamples.clear()
+                    val preRoll = preRollBuffer.getSamples()
+                    for (s in preRoll) {
+                        commandSamples.add(s)
+                    }
+                }
+
                 currentMode.set(Mode.COMMAND)
 
                 if (activeAudioRecord == null || captureJob == null || !captureJob!!.isActive) {
@@ -219,6 +240,21 @@ class AudioCaptureCoordinator(
                         speechOnsetDetected = false,
                         statusMessage = "Listening for command…"
                     )
+                }
+            }
+        }
+    }
+
+    /**
+     * User tapped the microphone while listening: finishes recording and processes immediately.
+     */
+    fun finishCommandCaptureNow() {
+        scope.launch {
+            captureMutex.withLock {
+                if (currentMode.get() == Mode.COMMAND && commandSamples.isNotEmpty()) {
+                    finishCommandCapture(commandSamples)
+                } else {
+                    stopInternal()
                 }
             }
         }
@@ -251,6 +287,10 @@ class AudioCaptureCoordinator(
         activeAudioRecord = null
         wakeWordFrameConsumer = null
         commandCallbacks = null
+        synchronized(commandSamples) {
+            commandSamples.clear()
+        }
+        commandSpeechOnset = false
         _telemetry.value = CaptureTelemetry(mode = Mode.IDLE, statusMessage = "Stopped")
     }
 
@@ -267,6 +307,10 @@ class AudioCaptureCoordinator(
         activeAudioRecord = null
         wakeWordFrameConsumer = null
         commandCallbacks = null
+        synchronized(commandSamples) {
+            commandSamples.clear()
+        }
+        commandSpeechOnset = false
         _telemetry.value = CaptureTelemetry(mode = Mode.IDLE, statusMessage = "Idle")
     }
 
@@ -280,8 +324,9 @@ class AudioCaptureCoordinator(
 
         var record: AudioRecord? = null
         val audioSources = listOf(
+            MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            MediaRecorder.AudioSource.MIC
+            MediaRecorder.AudioSource.DEFAULT
         )
 
         for (source in audioSources) {
@@ -319,13 +364,7 @@ class AudioCaptureCoordinator(
         captureJob = scope.launch(Dispatchers.Default) {
             val audioRecord = activeAudioRecord ?: return@launch
             val chunkBuffer = ShortArray(1024)
-            val commandSamples = ArrayList<Short>(AudioMath.SAMPLE_RATE * 6)
-
-            var ambientNoiseFloor = 40.0
-            var speechOnset = false
-            var speechStartTime = 0L
-            var lastVoiceTime = 0L
-            val commandCaptureStartTime = SystemClock.elapsedRealtime()
+            var ambientNoiseFloor = 30.0
 
             try {
                 while (isActive && currentMode.get() != Mode.IDLE) {
@@ -355,36 +394,37 @@ class AudioCaptureCoordinator(
                             }
 
                             Mode.COMMAND -> {
-                                // Accumulate all audio samples from the moment command mode begins
-                                for (i in 0 until readSize) {
-                                    commandSamples.add(chunkBuffer[i])
+                                synchronized(commandSamples) {
+                                    for (i in 0 until readSize) {
+                                        commandSamples.add(chunkBuffer[i])
+                                    }
                                 }
 
                                 if (rms > dynamicThreshold) {
-                                    if (!speechOnset) {
-                                        speechOnset = true
-                                        speechStartTime = now
+                                    if (!commandSpeechOnset) {
+                                        commandSpeechOnset = true
+                                        commandSpeechStartTime = now
                                         commandCallbacks?.onSpeechOnset?.invoke()
-                                        Log.d(TAG, "Speech onset detected! RMS: $rms > $dynamicThreshold")
+                                        Log.d(TAG, "Command speech onset detected! RMS: $rms > $dynamicThreshold")
                                     }
-                                    lastVoiceTime = now
+                                    commandLastVoiceTime = now
                                 }
 
-                                if (speechOnset) {
-                                    val silenceDuration = now - lastVoiceTime
-                                    val speechDuration = lastVoiceTime - speechStartTime
+                                if (commandSpeechOnset) {
+                                    val silenceDuration = now - commandLastVoiceTime
+                                    val speechDuration = commandLastVoiceTime - commandSpeechStartTime
 
                                     // Trailing silence detection (900ms silence after speech)
                                     if (speechDuration >= AudioMath.MIN_SPEECH_DURATION_MS &&
                                         silenceDuration >= AudioMath.TRAILING_SILENCE_WINDOW_MS
                                     ) {
-                                        Log.i(TAG, "Trailing silence detected ($silenceDuration ms). Finishing command capture.")
+                                        Log.i(TAG, "Trailing silence detected ($silenceDuration ms, speech was $speechDuration ms). Finishing command capture.")
                                         finishCommandCapture(commandSamples)
                                         break
                                     }
 
                                     // Hard maximum recording limit (12s)
-                                    if ((now - speechStartTime) >= AudioMath.HARD_MAX_RECORDING_MS) {
+                                    if ((now - commandSpeechStartTime) >= AudioMath.HARD_MAX_RECORDING_MS) {
                                         Log.i(TAG, "Hard maximum command duration reached. Finishing command capture.")
                                         finishCommandCapture(commandSamples)
                                         break
@@ -392,8 +432,7 @@ class AudioCaptureCoordinator(
                                 } else {
                                     // Initial silence timeout (no speech detected above threshold)
                                     if ((now - commandCaptureStartTime) >= AudioMath.INITIAL_SILENCE_TIMEOUT_MS) {
-                                        Log.i(TAG, "Initial silence timeout. Checking captured audio buffer.")
-                                        // If user spoke softly, we still captured the audio! Attempt Whisper transcription
+                                        Log.i(TAG, "Initial silence timeout reached (${AudioMath.INITIAL_SILENCE_TIMEOUT_MS}ms). Checking captured audio buffer (${commandSamples.size} samples).")
                                         if (commandSamples.size >= AudioMath.SAMPLE_RATE) {
                                             finishCommandCapture(commandSamples)
                                         } else {
@@ -410,8 +449,8 @@ class AudioCaptureCoordinator(
                                     currentRms = rms,
                                     ambientNoiseFloor = ambientNoiseFloor,
                                     dynamicThreshold = dynamicThreshold,
-                                    speechOnsetDetected = speechOnset,
-                                    statusMessage = if (speechOnset) "Hearing speech…" else "Listening…"
+                                    speechOnsetDetected = commandSpeechOnset,
+                                    statusMessage = if (commandSpeechOnset) "Hearing speech…" else "Listening…"
                                 )
                             }
 
@@ -448,17 +487,20 @@ class AudioCaptureCoordinator(
 
     private fun finishCommandCapture(recordedSamples: List<Short>) {
         val cb = commandCallbacks
-        // Stop hardware immediately before inference
-        stopInternal()
-
         if (recordedSamples.isEmpty()) {
+            stopInternal()
             cb?.onTimeout?.invoke()
             return
         }
 
-        val shortArr = ShortArray(recordedSamples.size) { recordedSamples[it] }
+        val shortArr = synchronized(commandSamples) {
+            ShortArray(recordedSamples.size) { recordedSamples[it] }
+        }
         val floatArr = AudioMath.shortArrayToNormalizedFloat(shortArr)
         val audioDurationSec = shortArr.size.toFloat() / AudioMath.SAMPLE_RATE
+
+        // Stop hardware immediately before inference
+        stopInternal()
 
         Log.i(TAG, "Command audio captured: ${shortArr.size} samples ($audioDurationSec sec). Triggering processing.")
         cb?.onAudioReady?.invoke(floatArr, audioDurationSec)

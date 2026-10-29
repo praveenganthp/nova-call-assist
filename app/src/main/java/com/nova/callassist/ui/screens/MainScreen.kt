@@ -176,11 +176,7 @@ fun MainScreen(
                 MicPulseIndicator(
                     state = state,
                     onClick = {
-                        if (state is AssistantState.ListeningForCommand) {
-                            controller.stopAssistant()
-                        } else {
-                            controller.startListeningManually()
-                        }
+                        controller.toggleListeningManually()
                     }
                 )
 
